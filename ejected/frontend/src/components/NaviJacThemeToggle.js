@@ -1,0 +1,2 @@
+import {__jacJsx, __jacSpawn} from "@jac/runtime";
+if (typeof globalThis !== "undefined") { if (!globalThis.__jacEndpointEffects__) globalThis.__jacEndpointEffects__ = {}; Object.assign(globalThis.__jacEndpointEffects__, {"func:NaviJacThemeToggle": {"is_writer": false, "touches": ["*"]}}); };

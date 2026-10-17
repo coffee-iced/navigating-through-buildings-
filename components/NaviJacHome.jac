@@ -1,0 +1,29 @@
+import from .ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent }
+import from .ui.badge { Badge }
+import from .ui.button { Button }
+import from .NaviJacThemeToggle { NaviJacThemeToggle }
+import from .NaviJacFloorMap { NaviJacFloorMap }
+import from "@jac/runtime" { Link }
+sv import from ..services.naviJacService { NaviJacMap, get_public_maps, get_featured_demo, seed_sumanadasa_floor }
+
+def:pub NaviJacHome() -> JsxElement {
+    has maps: list[NaviJacMap] = [], featured: NaviJacMap | None = None, loading: bool = True;
+    async can with entry {
+        _floor_id = await seed_sumanadasa_floor();
+        maps = await get_public_maps();
+        featured = await get_featured_demo();
+        loading = False;
+    }
+    return <div className="min-h-svh bg-muted/40 text-foreground">
+        <header className="border-b bg-background"><div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-5 sm:px-8"><Link to="/" className="flex items-center gap-3 text-foreground no-underline"><span className="flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground font-bold">N</span><span className="text-lg font-semibold tracking-tight">NaviJac</span></Link><div className="flex flex-wrap items-center gap-3"><Badge variant="secondary">Indoor maps</Badge><Link to="/timetable" className="text-sm font-medium text-primary">My timetable</Link><Link to="/creator" className="text-sm font-medium text-primary">Map creator sign in</Link><NaviJacThemeToggle /></div></div></header>
+        <main className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-5 py-7 sm:px-8 sm:py-10">
+            <section className="grid items-center gap-8 rounded-2xl border bg-card p-6 shadow-sm md:grid-cols-[1.1fr_0.9fr] md:p-9">
+                <div className="flex flex-col items-start gap-5"><Badge variant="outline">Explore · create · navigate</Badge><h1 className="text-balance text-4xl font-semibold leading-tight tracking-tight md:text-5xl">Navigate Any Building. Create Your Own Indoor Maps.</h1><p className="max-w-2xl text-base leading-relaxed text-muted-foreground">Explore building maps, discover room information, and follow verified indoor routes. Map creators can build and publish their own maps.</p><div className="flex flex-wrap gap-3"><Link to="/maps/sumanadasa/first-floor/route"><Button>Explore Demo Map</Button></Link><Link to="/creator"><Button variant="outline">Create Your Own Map</Button></Link></div></div>
+                <Card className="overflow-hidden shadow-sm"><CardHeader><CardTitle>Featured demonstration</CardTitle><CardDescription>Dr. L. H. Sumanadasa Building · Ground Floor</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><NaviJacFloorMap /><div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">The supplied plan's dimension grid and visible openings are interpreted estimates. Confirm doors and accessible routes on site before navigation.</div><Link to="/maps/sumanadasa/first-floor/route"><Button variant="outline" className="w-full">Open ground floor</Button></Link></CardContent></Card>
+            </section>
+            <section className="flex flex-col gap-5"><div className="flex flex-wrap items-end justify-between gap-4"><div><h2 className="text-2xl font-semibold tracking-tight">Explore published maps</h2><p className="text-sm text-muted-foreground">Public maps are browseable without an account.</p></div><Link to="/creator" className="text-sm font-medium text-primary">Manage your maps</Link></div><Card className="shadow-sm"><CardHeader><CardTitle>Published building maps</CardTitle><CardDescription>Featured demonstration first, followed by owner-published buildings.</CardDescription></CardHeader><CardContent>{if loading { <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">Loading public maps…</p>; skip; }}{if len(maps) == 0 { <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">No other published maps yet. Create an account to start a private draft.</p>; skip; }}<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{for building in maps { <article key={jid(building)} className="flex flex-col gap-3 rounded-xl border bg-background p-4 shadow-sm"><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold">{building.name}</h3><p className="mt-1 text-sm text-muted-foreground">{building.description if len(building.description) > 0 else "Published indoor map"}</p></div><Badge variant="secondary">Public</Badge></div><p className="text-xs text-muted-foreground">{str(building.floor_count)} floor(s)</p>{if building.is_featured { <Link to="/maps/sumanadasa/first-floor/route" className="text-sm font-medium text-primary hover:underline">Explore featured map</Link> } else { <span className="text-xs text-muted-foreground">Map viewer setup pending</span> }}</article> }}</div></CardContent></Card></section>
+            <section className="grid gap-5 md:grid-cols-2"><Card className="shadow-sm"><CardHeader><CardTitle>Room directory</CardTitle><CardDescription>Browse room names and provisional details in the featured floor map.</CardDescription></CardHeader><CardContent><Link to="/maps/sumanadasa/first-floor/route"><Button variant="outline">Search rooms</Button></Link></CardContent></Card><Card className="shadow-sm"><CardHeader><CardTitle>Create a map for your building</CardTitle><CardDescription>Sign in to create private drafts and publish maps you own.</CardDescription></CardHeader><CardContent><Link to="/creator"><Button>Create your own map</Button></Link></CardContent></Card></section>
+            <footer className="border-t pt-5 text-xs text-muted-foreground">NaviJac public map explorer · Route guidance appears only when map connections are verified.</footer>
+        </main>
+    </div>;
+}

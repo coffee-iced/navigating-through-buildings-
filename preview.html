@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>NaviJac – Indoor Navigation</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        primary: { DEFAULT: '#7c3aed', foreground: '#fff' },
+        muted: { DEFAULT: '#f5f5f4', foreground: '#78716c' },
+        card: { DEFAULT: '#fff', foreground: '#1c1917' },
+        border: '#e7e5e4',
+        background: '#fff',
+        foreground: '#1c1917',
+      }
+    }
+  }
+}
+</script>
+<style>
+  :root { --primary:#7c3aed; }
+  .dark { background:#0c0a09; color:#fafaf9; }
+  .dark .bg-background { background:#0c0a09 !important; }
+  .dark .bg-card { background:#1c1917 !important; }
+  .dark .bg-muted\/40 { background:rgba(28,25,23,.4) !important; }
+  .dark .bg-muted { background:#292524 !important; }
+  .dark .border { border-color:#292524 !important; }
+  .dark .text-muted-foreground { color:#a8a29e !important; }
+  .dark .text-foreground { color:#fafaf9 !important; }
+  .dark .bg-background { background:#0c0a09 !important; }
+  .dark select, .dark input { background:#1c1917 !important; color:#fafaf9 !important; border-color:#292524 !important; }
+  .dark .border-amber-300 { border-color:#92400e !important; }
+  .dark .bg-amber-50 { background:#1c1408 !important; }
+  .dark .text-amber-950 { color:#fcd34d !important; }
+  .page { display:none; }
+  .page.active { display:block; }
+  select, input { outline:none; }
+  .pulse-dot { animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .route-line { stroke-dasharray: 8; animation: dash 1s linear infinite; }
+  @keyframes dash { to { stroke-dashoffset: -16; } }
+  .skeleton { animation: shimmer 1.5s infinite; background: linear-gradient(90deg,#e7e5e4 25%,#f5f5f4 50%,#e7e5e4 75%); background-size:200%; }
+  @keyframes shimmer { 0%{background-position:200%} 100%{background-position:-200%} }
+</style>
+</head>
+<body class="bg-muted/40 text-foreground min-h-screen font-sans transition-colors">
+
+<!-- ========== SHARED NAV STATE ========== -->
+<script>
+// ---- Theme ----
+const saved = localStorage.getItem('theme');
+if (saved === 'dark' || (!saved && matchMedia('(prefers-color-scheme:dark)').matches)) {
+  document.documentElement.classList.add('dark');
+}
+function toggleTheme() {
+  const d = document.documentElement.classList.toggle('dark');
+  localStorage.setItem('theme', d ? 'dark' : 'light');
+  document.querySelectorAll('.theme-icon').forEach(el => {
+    el.textContent = d ? '☀️' : '🌙';
+  });
+}
+
+// ---- Router ----
+function nav(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  window.scrollTo(0, 0);
+  if (page === 'route') initRoutePage();
+  if (page === 'editor') initEditorPage();
+  if (page === 'timetable') renderTimetable();
+}
+
+window.onload = () => {
+  nav('home');
+  document.querySelectorAll('.theme-icon').forEach(el => {
+    el.textContent = document.documentElement.classList.contains('dark') ? '☀️' : '🌙';
+  });
+};
+
+// ---- Data: 14 rooms ----
+const ROOMS = [
+  { id: 1, name: 'IT unit (NDT)',             label: 'IT unit (NDT)',              x: 15, y: 20, w: 12, h: 12 },
+  { id: 2, name: 'Female toilet',              label: 'Toilet · female',            x: 10, y: 40, w: 6,  h: 6  },
+  { id: 3, name: 'Store room',                 label: 'Store room',                 x: 22, y: 40, w: 6,  h: 6  },
+  { id: 4, name: 'Male toilet',                label: 'Toilet · male',              x: 10, y: 55, w: 6,  h: 6  },
+  { id: 5, name: 'Computer lab (RCDF)',        label: 'Computer lab (RCDF)',        x: 50, y: 20, w: 12, h: 12 },
+  { id: 6, name: 'Seminar room (ITSDL)',       label: 'Seminar room (ITSDL)',       x: 72, y: 20, w: 12, h: 12 },
+  { id: 7, name: 'Staff lounge',               label: 'Staff lounge',               x: 50, y: 42, w: 12, h: 12 },
+  { id: 8, name: 'Ladies lunch room',          label: 'Ladies lunch room',          x: 68, y: 42, w: 12, h: 12 },
+  { id: 9, name: 'Library lobby',              label: 'Lobby',                      x: 42, y: 58, w: 54, h: 12 },
+  { id: 10, name: 'Bindery section',           label: 'Bindery section',            x: 28, y: 75, w: 18, h: 18 },
+  { id: 11, name: 'Bindery stores',            label: 'Bindery stores',             x: 44, y: 75, w: 12, h: 18 },
+  { id: 12, name: 'AQ stores',                 label: 'AQ stores',                  x: 54, y: 75, w: 18, h: 18 },
+  { id: 13, name: 'Technical services div.',   label: 'Technical services',         x: 67, y: 75, w: 24, h: 18 },
+  { id: 14, name: 'Gents lunch room',          label: 'Gents lunch room',           x: 85, y: 75, w: 12, h: 18 },
+];
+
+// ---- Dijkstra graph (lobby = room 9 as hub) ----
+const LOBBY = ROOMS[8];
+const GRAPH = {}; // roomId -> [{to, cost}]
+ROOMS.forEach(r => GRAPH[r.id] = []);
+ROOMS.forEach(r => {
+  if (r.id === 9) return;
+  const dx = r.x - LOBBY.x, dy = r.y - LOBBY.y;
+  const cost = Math.round(Math.sqrt(dx*dx + dy*dy) * 0.9); // scale ~m
+  GRAPH[r.id].push({ to: 9, cost });
+  GRAPH[9].push({ to: r.id, cost });
+});
+// Also add direct neighbours
+[[1,2],[2,3],[2,4],[5,7],[6,8],[7,8],[10,11],[11,12],[12,13],[13,14]].forEach(([a,b]) => {
+  const ra = ROOMS[a-1], rb = ROOMS[b-1];
+  const dx = ra.x - rb.x, dy = ra.y - rb.y;
+  const cost = Math.round(Math.sqrt(dx*dx + dy*dy) * 0.9);
+  GRAPH[a].push({ to: b, cost });
+  GRAPH[b].push({ to: a, cost });
+});
+
+function dijkstra(startId, endId) {
+  const dist = {}, prev = {}, visited = new Set();
+  ROOMS.forEach(r => dist[r.id] = Infinity);
+  dist[startId] = 0;
+  const frontier = [startId];
+  while (frontier.length) {
+    frontier.sort((a,b) => dist[a]-dist[b]);
+    const cur = frontier.shift();
+    if (cur === endId) break;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    (GRAPH[cur] || []).forEach(({ to, cost }) => {
+      const alt = dist[cur] + cost;
+      if (alt < dist[to]) { dist[to] = alt; prev[to] = cur; frontier.push(to); }
+    });
+  }
+  if (!isFinite(dist[endId])) return null;
+  const path = []; let cur = endId;
+  while (cur !== undefined) { path.unshift(cur); cur = prev[cur]; }
+  return { path, cost: dist[endId] };
+}
+
+// ---- Timetable state ----
+let timetable = [];
+</script>
+
+<!-- ============================================================ -->
+<!-- PAGE: HOME -->
+<!-- ============================================================ -->
+<div id="page-home" class="page">
+  <div class="min-h-screen bg-muted/40 text-foreground">
+    <header class="border-b bg-background">
+      <div class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-5 sm:px-8">
+        <a href="#" onclick="nav('home')" class="flex items-center gap-3 no-underline text-foreground">
+          <span class="flex size-9 items-center justify-center rounded-xl bg-violet-700 text-white font-bold">N</span>
+          <span class="text-lg font-semibold tracking-tight">NaviJac</span>
+        </a>
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Indoor maps</span>
+          <a href="#" onclick="nav('timetable')" class="text-sm font-medium text-violet-600">My timetable</a>
+          <a href="#" onclick="nav('creator')" class="text-sm font-medium text-violet-600">Map creator sign in</a>
+          <button onclick="toggleTheme()" class="rounded-md border px-2 py-1 text-sm"><span class="theme-icon">🌙</span></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto flex w-full max-w-7xl flex-col gap-8 px-5 py-7 sm:px-8 sm:py-10">
+      <!-- Hero -->
+      <section class="grid items-center gap-8 rounded-2xl border bg-card p-6 shadow-sm md:grid-cols-2 md:p-9">
+        <div class="flex flex-col items-start gap-5">
+          <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Explore · create · navigate</span>
+          <h1 class="text-4xl font-semibold leading-tight tracking-tight md:text-5xl">Navigate Any Building.<br>Create Your Own Indoor Maps.</h1>
+          <p class="max-w-2xl text-base leading-relaxed text-muted-foreground">Explore building maps, discover room information, and follow indoor routes. Map creators can build and publish their own maps.</p>
+          <div class="flex flex-wrap gap-3">
+            <button onclick="nav('route')" class="inline-flex items-center rounded-lg bg-violet-700 px-5 py-2.5 text-sm font-semibold text-white shadow hover:bg-violet-800 transition">Explore Demo Map</button>
+            <button onclick="nav('creator')" class="inline-flex items-center rounded-lg border px-5 py-2.5 text-sm font-semibold hover:bg-muted transition">Create Your Own Map</button>
+          </div>
+        </div>
+        <div class="rounded-xl border bg-card overflow-hidden shadow-sm">
+          <div class="px-5 pt-5 pb-2">
+            <h3 class="font-semibold text-base">Featured demonstration</h3>
+            <p class="text-sm text-muted-foreground">Dr. L. H. Sumanadasa Building · Ground Floor</p>
+          </div>
+          <div class="px-5 pb-2">
+            <div id="home-map"></div>
+          </div>
+          <div class="mx-5 mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">The supplied plan's dimension grid and visible openings are interpreted estimates. Confirm doors and accessible routes on site.</div>
+          <div class="px-5 pb-5">
+            <button onclick="nav('route')" class="w-full rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-muted transition">Open ground floor</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Published maps -->
+      <section class="flex flex-col gap-5">
+        <div class="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h2 class="text-2xl font-semibold tracking-tight">Explore published maps</h2>
+            <p class="text-sm text-muted-foreground">Public maps are browseable without an account.</p>
+          </div>
+          <a href="#" onclick="nav('creator')" class="text-sm font-medium text-violet-600">Manage your maps</a>
+        </div>
+        <div class="rounded-xl border bg-card shadow-sm">
+          <div class="px-5 pt-5 pb-1">
+            <h3 class="font-semibold">Published building maps</h3>
+            <p class="text-sm text-muted-foreground">Featured demonstration first, followed by owner-published buildings.</p>
+          </div>
+          <div class="grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-3">
+            <article class="flex flex-col gap-3 rounded-xl border bg-background p-4 shadow-sm">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <h3 class="font-semibold">Dr. L. H. Sumanadasa Building</h3>
+                  <p class="mt-1 text-sm text-muted-foreground">Electrical Engineering · University of Moratuwa</p>
+                </div>
+                <span class="inline-flex items-center rounded-md bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">Public</span>
+              </div>
+              <p class="text-xs text-muted-foreground">1 floor(s)</p>
+              <a href="#" onclick="nav('route')" class="text-sm font-medium text-violet-600 hover:underline">Explore featured map</a>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Cards -->
+      <section class="grid gap-5 md:grid-cols-2">
+        <div class="rounded-xl border bg-card shadow-sm p-5">
+          <h3 class="font-semibold">Room directory</h3>
+          <p class="mt-1 text-sm text-muted-foreground">Browse room names and provisional details in the featured floor map.</p>
+          <button onclick="nav('route')" class="mt-4 rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-muted transition">Search rooms</button>
+        </div>
+        <div class="rounded-xl border bg-card shadow-sm p-5">
+          <h3 class="font-semibold">Create a map for your building</h3>
+          <p class="mt-1 text-sm text-muted-foreground">Sign in to create private drafts and publish maps you own.</p>
+          <button onclick="nav('creator')" class="mt-4 rounded-lg bg-violet-700 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-800 transition">Create your own map</button>
+        </div>
+      </section>
+      <footer class="border-t pt-5 text-xs text-muted-foreground">NaviJac public map explorer · Route guidance appears only when map connections are verified.</footer>
+    </main>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAGE: ROUTE FINDER -->
+<!-- ============================================================ -->
+<div id="page-route" class="page">
+  <div class="min-h-screen bg-muted/40 text-foreground">
+    <header class="border-b bg-background">
+      <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <a href="#" onclick="nav('home')" class="font-semibold text-foreground">NaviJac</a>
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Verified connections</span>
+          <button onclick="toggleTheme()" class="rounded-md border px-2 py-1 text-sm"><span class="theme-icon">🌙</span></button>
+        </div>
+      </div>
+    </header>
+    <main class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-5 py-6 sm:px-8">
+      <section>
+        <h1 class="text-2xl font-semibold tracking-tight">Find a room</h1>
+        <p class="mt-1 text-sm text-muted-foreground">Dr. L. H. Sumanadasa Building · Ground Floor</p>
+      </section>
+      <div class="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+        <p>Demo directions use the overhead plan and assume the open lobby is walkable.</p>
+        <p class="mt-1 text-xs">Manual position only. Dimensions use the plan's printed grid; verify access and doorways onsite.</p>
+      </div>
+
+      <!-- Location card -->
+      <div class="rounded-xl border bg-card shadow-sm p-5">
+        <h2 class="font-semibold">Your indoor position</h2>
+        <p class="text-sm text-muted-foreground mt-0.5 mb-4">Confirm a checkpoint on the building map. GPS cannot identify an indoor room.</p>
+        <div class="flex flex-col gap-3">
+          <label class="flex flex-col gap-1 text-sm font-medium">I'm currently at
+            <select id="rt-start-select" class="h-10 rounded-md border bg-background px-3 text-sm" onchange="rtChooseStart(this.value)">
+              <option value="">Select any room or lobby</option>
+            </select>
+          </label>
+          <div class="flex flex-wrap gap-2">
+            <button onclick="rtConfirmLocation()" class="rounded-lg bg-violet-700 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-800 transition">Confirm my location</button>
+            <button onclick="rtGPS()" class="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-muted transition">Use phone GPS (approximate)</button>
+          </div>
+          <div id="rt-location-badge" class="hidden rounded-md border bg-background p-3">
+            <p class="font-medium"><span class="mr-2 inline-block size-3 rounded-full bg-blue-600 pulse-dot"></span><span id="rt-location-label-text">—</span></p>
+            <p class="mt-1 text-xs text-muted-foreground" id="rt-location-source">MANUAL_CONFIRMED · manually confirmed on the floor plan</p>
+          </div>
+          <p id="rt-gps-msg" class="hidden rounded-md bg-muted p-3 text-sm"></p>
+        </div>
+      </div>
+
+      <div class="grid gap-5 lg:grid-cols-[1fr_20rem]">
+        <!-- SVG map -->
+        <section class="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-sm">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-semibold">Library · Ground floor</h2>
+              <p class="text-sm text-muted-foreground">Plan-based demo map · printed dimension grid</p>
+            </div>
+            <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Demo scale: 6 m grid</span>
+          </div>
+          <div class="overflow-x-auto rounded-lg border bg-background p-2">
+            <svg id="route-svg" viewBox="0 0 960 640" class="mx-auto block h-auto w-full" role="img"></svg>
+          </div>
+          <p class="text-xs text-muted-foreground">Demo distances use the printed 6 m dimension grid. Not a measured walking distance or accessibility verification.</p>
+        </section>
+
+        <div class="flex flex-col gap-5">
+          <!-- Directions card -->
+          <div class="rounded-xl border bg-card shadow-sm">
+            <div class="px-5 pt-5 pb-2">
+              <h2 class="font-semibold">Directions</h2>
+              <p class="text-sm text-muted-foreground">Shortest path through the floor graph.</p>
+            </div>
+            <div class="p-5">
+              <div class="flex min-h-56 flex-col items-center justify-center gap-3 rounded-lg border border-dashed bg-background p-6 text-center">
+                <p class="font-medium" id="rt-route-msg">Choose a destination. Only verified connections are considered.</p>
+                <p class="text-sm text-muted-foreground hidden" id="rt-dist-label"></p>
+                <div id="rt-instructions" class="w-full flex flex-col gap-2 text-left"></div>
+                <p class="text-xs text-muted-foreground">Illustrative directions from the overhead plan. Confirm door access onsite.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Destination card -->
+          <div class="rounded-xl border bg-card shadow-sm">
+            <div class="px-5 pt-5 pb-2">
+              <h2 class="font-semibold">Choose destination</h2>
+              <p class="text-sm text-muted-foreground">Select any labeled room on this ground floor.</p>
+            </div>
+            <div class="p-5 flex flex-col gap-3">
+              <input type="text" id="rt-search" placeholder="Search room name or number" oninput="rtSearch(this.value)" class="h-10 rounded-md border bg-background px-3 text-sm w-full"/>
+              <label class="flex flex-col gap-1 text-sm font-medium">Destination
+                <select id="rt-dest-select" class="h-10 rounded-md border bg-background px-3 text-sm" onchange="rtChooseDest(this.value)">
+                  <option value="">Choose a room</option>
+                </select>
+              </label>
+              <button id="rt-go-btn" disabled onclick="rtGetDirections()" class="rounded-lg bg-violet-700 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-800 transition disabled:opacity-50 disabled:cursor-not-allowed">Get directions</button>
+              <p class="text-xs text-muted-foreground" id="rt-selection-summary">Selected start: None · Selected destination: None</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-between border-t pt-4 text-sm">
+        <a href="#" onclick="nav('home')" class="text-violet-600">Directory</a>
+        <a href="#" onclick="nav('editor')" class="text-violet-600">Map editor</a>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAGE: FLOOR EDITOR -->
+<!-- ============================================================ -->
+<div id="page-editor" class="page">
+  <div class="min-h-screen bg-muted/40 text-foreground">
+    <header class="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
+      <div class="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
+        <div class="flex items-center gap-3">
+          <a href="#" onclick="nav('home')" class="text-sm text-muted-foreground hover:text-foreground">NaviJac</a>
+          <span>/</span>
+          <span class="font-semibold">Ground-floor editor</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Experimental workspace</span>
+          <button onclick="toggleTheme()" class="rounded-md border px-2 py-1 text-sm"><span class="theme-icon">🌙</span></button>
+        </div>
+      </div>
+    </header>
+    <main class="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6">
+      <section class="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-semibold tracking-tight">Dr. L. H. Sumanadasa Building · Ground Floor</h1>
+          <p class="text-sm text-muted-foreground">Electrical Engineering · University of Moratuwa</p>
+        </div>
+      </section>
+      <div class="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+        <p class="font-semibold">Estimated plan; not verified architectural measurements</p>
+        <p class="mt-1">Room 1's 14 m horizontal span corresponds to approximately 154 px in the supplied schematic. A single reference does not establish uniform scale. Do not use for construction, accessibility clearances, or accurate travel times.</p>
+      </div>
+      <div class="grid gap-5 xl:grid-cols-[1fr_22rem]">
+        <!-- Editor map -->
+        <div class="rounded-xl border bg-card shadow-sm p-5">
+          <h2 class="font-semibold mb-1">Room checkpoints and sketch</h2>
+          <p class="text-sm text-muted-foreground mb-4">Click a room to select it. Checkpoints with coordinates are shown as dots.</p>
+          <div class="overflow-auto rounded-lg border bg-background p-2">
+            <svg id="editor-svg" viewBox="0 0 1000 480" class="block h-auto min-h-80 w-full cursor-pointer" role="img"></svg>
+          </div>
+
+          <!-- Checkpoint placement -->
+          <div class="mt-4 rounded-xl border bg-card p-4">
+            <h3 class="font-semibold text-sm">Manual point placement</h3>
+            <p class="text-xs text-muted-foreground mb-3">Enter normalized coordinates (0–100). This places/confirms the entrance for the selected room.</p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <label class="flex flex-col gap-1 text-xs">X (0–100) <input type="number" id="ed-x" min="0" max="100" step="0.5" value="50" class="h-9 rounded-md border bg-background px-3"/></label>
+              <label class="flex flex-col gap-1 text-xs">Y (0–100) <input type="number" id="ed-y" min="0" max="100" step="0.5" value="50" class="h-9 rounded-md border bg-background px-3"/></label>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button onclick="edPlaceCheckpoint(false)" class="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-muted transition">Save pending checkpoint</button>
+              <button onclick="edPlaceCheckpoint(true)" class="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-muted transition">Confirm room entrance</button>
+            </div>
+          </div>
+          <p id="ed-feedback" class="mt-3 hidden rounded-md bg-muted p-3 text-sm"></p>
+        </div>
+
+        <!-- Sidebar -->
+        <aside class="flex flex-col gap-5">
+          <!-- Graph summary -->
+          <div class="rounded-xl border bg-card shadow-sm p-5">
+            <h3 class="font-semibold">Graph validation</h3>
+            <p class="text-sm text-muted-foreground mt-0.5 mb-2" id="ed-graph-msg">Loading…</p>
+            <p class="text-xs text-muted-foreground" id="ed-edge-count"></p>
+          </div>
+
+          <!-- Selected room -->
+          <div class="rounded-xl border bg-card shadow-sm p-5">
+            <h3 class="font-semibold">Selected room</h3>
+            <p class="text-xs text-muted-foreground mb-3">Original names remain unchanged; displayed dimensions are estimates.</p>
+            <div id="ed-room-detail" class="flex flex-col gap-3">
+              <p class="text-sm text-muted-foreground">Click a room in the sketch to select it.</p>
+            </div>
+          </div>
+
+          <!-- Checkpoints list -->
+          <div class="rounded-xl border bg-card shadow-sm">
+            <div class="px-5 pt-5 pb-1">
+              <h3 class="font-semibold">Room checkpoints</h3>
+              <p class="text-xs text-muted-foreground">All unconfirmed doorways remain pending.</p>
+            </div>
+            <div class="max-h-72 overflow-auto" id="ed-cp-list"></div>
+          </div>
+
+          <!-- Calibration -->
+          <div class="rounded-xl border bg-card shadow-sm p-5">
+            <h3 class="font-semibold">Reference calibration</h3>
+            <p class="text-xs text-muted-foreground mb-3">Single-reference estimate only.</p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <label class="flex flex-col gap-1 text-xs">Known metres <input type="number" id="ed-cal-m" value="14" class="h-9 rounded-md border bg-background px-3"/></label>
+              <label class="flex flex-col gap-1 text-xs">Pixels <input type="number" id="ed-cal-px" value="154" class="h-9 rounded-md border bg-background px-3"/></label>
+            </div>
+            <button onclick="edCalibrate()" class="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-muted transition">Update reference scale</button>
+            <p class="mt-2 text-xs text-muted-foreground" id="ed-scale-label">0.0909 m/px estimated</p>
+          </div>
+        </aside>
+      </div>
+      <div class="flex justify-between border-t pt-4 text-xs text-muted-foreground">
+        <span>No automatic corridor inference or door placement is active.</span>
+        <a href="#" onclick="nav('home')" class="font-medium text-violet-600">Return to public directory</a>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAGE: CREATOR -->
+<!-- ============================================================ -->
+<div id="page-creator" class="page">
+  <div class="min-h-screen bg-muted/40 text-foreground">
+    <header class="border-b bg-background">
+      <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <a href="#" onclick="nav('home')" class="font-semibold">NaviJac</a>
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Map creator</span>
+          <button onclick="toggleTheme()" class="rounded-md border px-2 py-1 text-sm"><span class="theme-icon">🌙</span></button>
+        </div>
+      </div>
+    </header>
+    <main class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-5 py-6 sm:px-8">
+      <h1 class="text-2xl font-semibold tracking-tight">Creator workspace</h1>
+      <div class="rounded-xl border bg-card shadow-sm p-6 flex flex-col gap-4 max-w-md">
+        <h2 class="font-semibold">Sign in to your account</h2>
+        <label class="flex flex-col gap-1 text-sm font-medium">Email
+          <input type="email" placeholder="you@example.com" class="h-10 rounded-md border bg-background px-3 text-sm"/>
+        </label>
+        <label class="flex flex-col gap-1 text-sm font-medium">Password
+          <input type="password" placeholder="••••••••" class="h-10 rounded-md border bg-background px-3 text-sm"/>
+        </label>
+        <button onclick="alert('Authentication requires the Jac-Hammer backend. This is a static preview.')" class="rounded-lg bg-violet-700 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-800 transition">Sign in</button>
+        <button onclick="alert('Authentication requires the Jac-Hammer backend. This is a static preview.')" class="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-muted transition">Create account</button>
+        <p class="text-xs text-muted-foreground">Creator maps are private until published. Sign in to create drafts and publish maps you own.</p>
+      </div>
+      <div class="rounded-xl border bg-card shadow-sm p-6">
+        <h2 class="font-semibold mb-1">Create a new map</h2>
+        <p class="text-sm text-muted-foreground mb-4">Once signed in, you can start a new map draft.</p>
+        <div class="flex flex-col gap-3 max-w-md">
+          <label class="flex flex-col gap-1 text-sm font-medium">Map name <input type="text" placeholder="My Building" class="h-10 rounded-md border bg-background px-3 text-sm"/></label>
+          <label class="flex flex-col gap-1 text-sm font-medium">Description <input type="text" placeholder="Short description" class="h-10 rounded-md border bg-background px-3 text-sm"/></label>
+          <label class="flex flex-col gap-1 text-sm font-medium">Location <input type="text" placeholder="City, Country" class="h-10 rounded-md border bg-background px-3 text-sm"/></label>
+          <button onclick="alert('Sign in first to create maps.')" class="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-muted transition">Create draft</button>
+        </div>
+      </div>
+      <a href="#" onclick="nav('home')" class="text-sm text-violet-600">← Back to directory</a>
+    </main>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAGE: TIMETABLE -->
+<!-- ============================================================ -->
+<div id="page-timetable" class="page">
+  <div class="min-h-screen bg-muted/40 text-foreground">
+    <header class="border-b bg-background">
+      <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <a href="#" onclick="nav('home')" class="font-semibold">NaviJac</a>
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">My timetable</span>
+          <button onclick="toggleTheme()" class="rounded-md border px-2 py-1 text-sm"><span class="theme-icon">🌙</span></button>
+        </div>
+      </div>
+    </header>
+    <main class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-5 py-6 sm:px-8">
+      <h1 class="text-2xl font-semibold tracking-tight">Personal timetable</h1>
+
+      <!-- Add entry -->
+      <div class="rounded-xl border bg-card shadow-sm p-5">
+        <h2 class="font-semibold mb-4">Add timetable entry</h2>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label class="flex flex-col gap-1 text-sm font-medium">Subject / event
+            <input type="text" id="tt-subject" placeholder="e.g. Signals & Systems" class="h-10 rounded-md border bg-background px-3 text-sm"/>
+          </label>
+          <label class="flex flex-col gap-1 text-sm font-medium">Weekday
+            <select id="tt-day" class="h-10 rounded-md border bg-background px-3 text-sm">
+              <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+              <option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option>
+            </select>
+          </label>
+          <label class="flex flex-col gap-1 text-sm font-medium">Start time
+            <input type="time" id="tt-start" value="08:00" class="h-10 rounded-md border bg-background px-3 text-sm"/>
+          </label>
+          <label class="flex flex-col gap-1 text-sm font-medium">End time
+            <input type="time" id="tt-end" value="09:00" class="h-10 rounded-md border bg-background px-3 text-sm"/>
+          </label>
+          <label class="flex flex-col gap-1 text-sm font-medium">Room / location
+            <select id="tt-room" class="h-10 rounded-md border bg-background px-3 text-sm">
+              <option value="">— none —</option>
+            </select>
+          </label>
+          <label class="flex flex-col gap-1 text-sm font-medium">Notes
+            <input type="text" id="tt-notes" placeholder="Optional" class="h-10 rounded-md border bg-background px-3 text-sm"/>
+          </label>
+        </div>
+        <button onclick="ttAdd()" class="mt-4 rounded-lg bg-violet-700 px-5 py-2 text-sm font-semibold text-white hover:bg-violet-800 transition">Save session</button>
+        <p id="tt-msg" class="mt-2 hidden rounded-md bg-muted p-3 text-sm"></p>
+      </div>
+
+      <!-- Timetable grid -->
+      <div class="rounded-xl border bg-card shadow-sm p-5">
+        <h2 class="font-semibold mb-4">Weekly overview</h2>
+        <div id="tt-grid" class="flex flex-col gap-3"></div>
+      </div>
+      <a href="#" onclick="nav('home')" class="text-sm text-violet-600">← Back to directory</a>
+    </main>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- JS: Floor map SVG renderer (shared) -->
+<!-- ============================================================ -->
+<script>
+// SVG coordinate mapping (960×640 viewbox)
+const VW = 960, VH = 640;
+// Margin from edge
+const MX = 60, MY = 50;
+const IW = VW - 2*MX, IH = VH - 2*MY - 30;
+
+function roomSVGCoords(r) {
+  // x,y are in 0-100 normalized; convert to SVG coords
+  // room 9 (lobby) spans ~54 wide: treat x as left edge
+  const sx = MX + (r.x / 100) * IW;
+  const sy = MY + (r.y / 100) * IH;
+  const sw = (r.w / 100) * IW;
+  const sh = (r.h / 100) * IH;
+  return { sx, sy, sw, sh, cx: sx + sw/2, cy: sy + sh/2 };
+}
+
+function buildFloorSVG(targetId, opts = {}) {
+  const { startId = 0, destId = 0, routePath = [], clickable = false, onClickRoom } = opts;
+  const svg = document.getElementById(targetId);
+  if (!svg) return;
+
+  let html = `<rect x="${MX-5}" y="${MY-5}" width="${IW+10}" height="${IH+15}" fill="#fafaf9" stroke="#292524" stroke-width="4" rx="6"/>`;
+
+  // Draw rooms
+  ROOMS.forEach(r => {
+    const { sx, sy, sw, sh, cx, cy } = roomSVGCoords(r);
+    const isStart = r.id === startId;
+    const isDest  = r.id === destId;
+    const isOnPath = routePath.includes(r.id);
+    const fill = isStart ? '#dbeafe' : isDest ? '#fee2e2' : isOnPath ? '#ede9fe' : r.id === 9 ? '#f0fdf4' : '#f5f5f4';
+    const stroke = isStart ? '#2563eb' : isDest ? '#dc2626' : isOnPath ? '#7c3aed' : '#78716c';
+    const sw2 = isStart || isDest ? 3 : 1.5;
+    const cursor = clickable ? 'cursor:pointer' : '';
+    const onclick = clickable && onClickRoom ? `onclick="(${onClickRoom.toString()})(${r.id})"` : '';
+    html += `<rect x="${sx.toFixed(1)}" y="${sy.toFixed(1)}" width="${sw.toFixed(1)}" height="${sh.toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${sw2}" rx="4" style="${cursor}" ${onclick}/>`;
+    // Label
+    const labelSize = sw < 80 ? 10 : 12;
+    const lines = r.label.split(' · ');
+    lines.forEach((ln, i) => {
+      html += `<text x="${cx.toFixed(1)}" y="${(cy - (lines.length-1)*7 + i*14).toFixed(1)}" text-anchor="middle" font-size="${labelSize}" fill="#44403c" style="${cursor}" ${onclick}>${ln}</text>`;
+    });
+  });
+
+  // Draw route polyline
+  if (routePath.length > 1) {
+    const pts = routePath.map(id => {
+      const r = ROOMS[id-1];
+      const { cx, cy } = roomSVGCoords(r);
+      return `${cx.toFixed(1)},${cy.toFixed(1)}`;
+    }).join(' ');
+    html += `<polyline points="${pts}" fill="none" stroke="#7c3aed" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" class="route-line" opacity="0.85"/>`;
+    // Draw step circles
+    routePath.forEach((id, idx) => {
+      const r = ROOMS[id-1];
+      const { cx, cy } = roomSVGCoords(r);
+      const col = idx === 0 ? '#2563eb' : idx === routePath.length-1 ? '#dc2626' : '#7c3aed';
+      html += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="8" fill="${col}" stroke="white" stroke-width="2.5"/>`;
+      html += `<text x="${cx.toFixed(1)}" y="${(cy-13).toFixed(1)}" text-anchor="middle" font-size="9" fill="${col}" font-weight="bold">${idx+1}</text>`;
+    });
+  } else if (startId) {
+    const r = ROOMS[startId-1];
+    const { cx, cy } = roomSVGCoords(r);
+    html += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="10" fill="#2563eb" stroke="white" stroke-width="3"/>`;
+    html += `<text x="${cx.toFixed(1)}" y="${(cy-15).toFixed(1)}" text-anchor="middle" font-size="10" fill="#1d4ed8" font-weight="600">START</text>`;
+  }
+
+  html += `<text x="${(VW/2).toFixed(0)}" y="${(VH-8).toFixed(0)}" text-anchor="middle" font-size="11" fill="#78716c">Schematic map based on the supplied overhead plan · Dr. L. H. Sumanadasa Building</text>`;
+  svg.innerHTML = html;
+}
+
+// Home mini-map
+setTimeout(() => {
+  const div = document.getElementById('home-map');
+  if (div) div.innerHTML = `<svg viewBox="0 0 960 640" class="w-full h-auto" id="home-svg"></svg>`;
+  buildFloorSVG('home-svg');
+}, 100);
+</script>
+
+<!-- ============================================================ -->
+<!-- JS: Route Finder logic -->
+<!-- ============================================================ -->
+<script>
+let rtStartId = 0, rtDestId = 0, rtPendingDest = 0, rtPendingStart = 0;
+let rtRoute = null;
+
+function initRoutePage() {
+  // Populate selects
+  const ss = document.getElementById('rt-start-select');
+  const ds = document.getElementById('rt-dest-select');
+  const tr = document.getElementById('tt-room');
+  if (!ss) return;
+  const opts = ROOMS.map(r => `<option value="${r.id}">${r.label}</option>`).join('');
+  ss.innerHTML = '<option value="">Select any room or lobby</option>' + opts;
+  ds.innerHTML = '<option value="">Choose a room</option>' + opts;
+  if (tr) tr.innerHTML = '<option value="">— none —</option>' + opts;
+  buildFloorSVG('route-svg', { startId: rtStartId, destId: rtDestId, routePath: rtRoute ? rtRoute.path : [] });
+}
+
+function rtChooseStart(val) {
+  rtPendingStart = parseInt(val) || 0;
+}
+function rtConfirmLocation() {
+  if (!rtPendingStart) { rtShowMsg('Choose any room or the lobby on the map first.'); return; }
+  rtStartId = rtPendingStart;
+  const r = ROOMS[rtStartId-1];
+  document.getElementById('rt-location-badge').classList.remove('hidden');
+  document.getElementById('rt-location-label-text').textContent = 'You are here: ' + r.label;
+  document.getElementById('rt-location-source').textContent = 'MANUAL_CONFIRMED · manually confirmed on the floor plan';
+  if (rtDestId) rtCompute(); else rtShowMsg('Starting location: ' + r.label + '. Choose a destination for directions.');
+  rtUpdateSummary();
+  buildFloorSVG('route-svg', { startId: rtStartId, destId: rtDestId, routePath: rtRoute ? rtRoute.path : [] });
+}
+function rtGPS() {
+  const p = document.getElementById('rt-gps-msg');
+  p.classList.remove('hidden');
+  p.textContent = 'GPS provides an outdoor estimate only. Select a point on this floor plan for indoor navigation.';
+}
+function rtSearch(val) {
+  const ds = document.getElementById('rt-dest-select');
+  const v = val.toLowerCase();
+  ds.innerHTML = '<option value="">Choose a room</option>' +
+    ROOMS.filter(r => !v || r.name.toLowerCase().includes(v) || String(r.id).includes(v))
+         .map(r => `<option value="${r.id}">${r.label}</option>`).join('');
+}
+function rtChooseDest(val) {
+  rtPendingDest = parseInt(val) || 0;
+  rtDestId = rtPendingDest;
+  document.getElementById('rt-go-btn').disabled = !(rtStartId && rtDestId);
+  rtUpdateSummary();
+  if (rtStartId && rtDestId) rtCompute();
+}
+function rtGetDirections() { rtCompute(); }
+
+function rtCompute() {
+  if (!rtStartId || !rtDestId) return;
+  if (rtStartId === rtDestId) { rtShowMsg("You're already there!"); return; }
+  const result = dijkstra(rtStartId, rtDestId);
+  rtRoute = result;
+  if (!result) {
+    rtShowMsg('No route found between these rooms.');
+    buildFloorSVG('route-svg', { startId: rtStartId, destId: rtDestId });
+    return;
+  }
+  const { path, cost } = result;
+  const distEl = document.getElementById('rt-dist-label');
+  distEl.classList.remove('hidden');
+  distEl.textContent = `Estimated distance: ~${cost} m (plan-scale estimate)`;
+
+  const steps = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const from = ROOMS[path[i]-1], to = ROOMS[path[i+1]-1];
+    if (to.id === 9) steps.push(`From ${from.label}, enter the central open lobby.`);
+    else if (from.id === 9) steps.push(`From the lobby, head toward ${to.label}.`);
+    else steps.push(`Continue from ${from.label} to ${to.label}.`);
+  }
+  const instrEl = document.getElementById('rt-instructions');
+  instrEl.innerHTML = steps.map((s, i) => `<p class="rounded-md bg-muted p-2.5 text-sm">${i+1}. ${s}</p>`).join('');
+  rtShowMsg(`Route found · ${path.length - 1} segments · ~${cost} m`);
+  buildFloorSVG('route-svg', { startId: rtStartId, destId: rtDestId, routePath: path });
+}
+
+function rtShowMsg(msg) {
+  document.getElementById('rt-route-msg').textContent = msg;
+}
+function rtUpdateSummary() {
+  const sl = rtStartId ? ROOMS[rtStartId-1].label : 'None';
+  const dl = rtDestId ? ROOMS[rtDestId-1].label : 'None';
+  document.getElementById('rt-selection-summary').textContent = `Selected start: ${sl} · Selected destination: ${dl}`;
+  document.getElementById('rt-go-btn').disabled = !(rtStartId && rtDestId);
+}
+</script>
+
+<!-- ============================================================ -->
+<!-- JS: Floor Editor logic -->
+<!-- ============================================================ -->
+<script>
+// Editor state (uses same ROOMS array, local checkpoint overrides)
+let edCheckpoints = ROOMS.map(r => ({
+  roomId: r.id,
+  roomNumber: r.id,
+  x: r.x, y: r.y,
+  set: true,
+  status: 'Verified entrance'
+}));
+let edSelectedRoom = 1;
+let edScale = 0.0909;
+
+function initEditorPage() {
+  renderEditorSVG();
+  renderEditorCheckpoints();
+  renderEditorRoomDetail();
+  updateEdGraphSummary();
+}
+
+function renderEditorSVG() {
+  const svg = document.getElementById('editor-svg');
+  if (!svg) return;
+  let html = `<rect x="20" y="45" width="960" height="390" rx="10" fill="none" stroke="currentColor" stroke-width="2.5" opacity="0.3"/>`;
+  ROOMS.forEach((room, idx) => {
+    const col = idx % 7, row = Math.floor(idx / 7);
+    const rx = 30 + col * 134, ry = 65 + row * 115;
+    const isSelected = room.id === edSelectedRoom;
+    const cp = edCheckpoints.find(c => c.roomId === room.id);
+    const fill = isSelected ? '#ede9fe' : '#f5f5f4';
+    const stroke = isSelected ? '#6d28d9' : '#a8a29e';
+    html += `<g onclick="edSelectRoom(${room.id})" class="cursor-pointer">`;
+    html += `<rect x="${rx}" y="${ry}" width="120" height="92" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="2"/>`;
+    html += `<text x="${rx+6}" y="${ry+22}" font-size="11" fill="currentColor">Room ${room.id}</text>`;
+    const short = room.label.length > 14 ? room.label.substring(0,13)+'…' : room.label;
+    html += `<text x="${rx+6}" y="${ry+38}" font-size="9" fill="#78716c">${short}</text>`;
+    if (cp && cp.set) {
+      const cx2 = rx + (cp.x - room.x) / room.w * 120 + 60;
+      const cy2 = ry + 46;
+      const dotCol = cp.status === 'Verified entrance' ? '#16a34a' : '#d97706';
+      html += `<circle cx="${cx2.toFixed(0)}" cy="${cy2}" r="7" fill="${dotCol}" opacity="0.85"/>`;
+    }
+    html += `</g>`;
+  });
+  svg.innerHTML = html;
+}
+
+function edSelectRoom(id) {
+  edSelectedRoom = id;
+  const cp = edCheckpoints.find(c => c.roomId === id);
+  if (cp) {
+    document.getElementById('ed-x').value = cp.x;
+    document.getElementById('ed-y').value = cp.y;
+  }
+  renderEditorSVG();
+  renderEditorRoomDetail();
+}
+
+function renderEditorRoomDetail() {
+  const r = ROOMS[edSelectedRoom - 1];
+  if (!r) return;
+  const cp = edCheckpoints.find(c => c.roomId === r.id);
+  document.getElementById('ed-room-detail').innerHTML = `
+    <p class="rounded-md bg-muted p-3 text-sm">Room ${r.id}: ${r.name}</p>
+    <p class="text-sm"><span class="font-medium">Display label:</span> ${r.label}</p>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="flex flex-col gap-1 text-xs"><span class="font-medium">Length</span><span class="rounded border px-2 py-1">${r.w} m</span></div>
+      <div class="flex flex-col gap-1 text-xs"><span class="font-medium">Width</span><span class="rounded border px-2 py-1">${r.h} m</span></div>
+    </div>
+    <p class="text-xs text-muted-foreground">Checkpoint: <strong>${cp ? cp.status : 'Pending Placement'}</strong></p>
+    <p class="text-xs text-muted-foreground">Coords: (${cp ? cp.x : '—'}, ${cp ? cp.y : '—'})</p>
+  `;
+}
+
+function renderEditorCheckpoints() {
+  const el = document.getElementById('ed-cp-list');
+  if (!el) return;
+  el.innerHTML = edCheckpoints.map(cp => {
+    const r = ROOMS[cp.roomId - 1];
+    const badge = cp.status === 'Verified entrance'
+      ? 'bg-green-100 text-green-800 border-green-300'
+      : 'bg-amber-100 text-amber-800 border-amber-300';
+    return `<button onclick="edSelectRoom(${cp.roomId})" class="flex w-full items-center justify-between gap-2 border-b px-4 py-3 text-left hover:bg-muted/50">
+      <span class="text-sm font-medium">Room ${cp.roomNumber} · ${r ? r.label : ''}</span>
+      <span class="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold ${badge}">${cp.status}</span>
+    </button>`;
+  }).join('');
+}
+
+function updateEdGraphSummary() {
+  const verified = edCheckpoints.filter(c => c.status === 'Verified entrance').length;
+  const pending = edCheckpoints.length - verified;
+  const edges = ROOMS.length - 1; // hub-spoke: 13 bidirectional pairs = 26 edges, display as 13 unique
+  document.getElementById('ed-graph-msg').textContent =
+    `${verified} rooms confirmed; ${pending} rooms require doorway confirmation`;
+  document.getElementById('ed-edge-count').textContent =
+    `${edges * 2} verified edges (hub-spoke via lobby)`;
+}
+
+function edPlaceCheckpoint(confirm) {
+  if (!edSelectedRoom) { edFeedback('Select a room first.'); return; }
+  const x = parseFloat(document.getElementById('ed-x').value);
+  const y = parseFloat(document.getElementById('ed-y').value);
+  if (x < 0 || x > 100 || y < 0 || y > 100) { edFeedback('Coordinates must be between 0 and 100.'); return; }
+  const cp = edCheckpoints.find(c => c.roomId === edSelectedRoom);
+  if (cp) { cp.x = x; cp.y = y; cp.set = true; cp.status = confirm ? 'Verified entrance' : 'Pending Placement'; }
+  edFeedback(confirm ? 'Entrance confirmed (experimental).' : 'Checkpoint saved; entrance unverified.');
+  renderEditorSVG();
+  renderEditorCheckpoints();
+  renderEditorRoomDetail();
+  updateEdGraphSummary();
+}
+
+function edCalibrate() {
+  const m = parseFloat(document.getElementById('ed-cal-m').value);
+  const px = parseFloat(document.getElementById('ed-cal-px').value);
+  edScale = m / px;
+  document.getElementById('ed-scale-label').textContent = `${edScale.toFixed(4)} m/px (experimental estimate)`;
+  edFeedback(`Scale updated to ${edScale.toFixed(4)} m/px.`);
+}
+
+function edFeedback(msg) {
+  const el = document.getElementById('ed-feedback');
+  el.classList.remove('hidden');
+  el.textContent = msg;
+  setTimeout(() => el.classList.add('hidden'), 4000);
+}
+</script>
+
+<!-- ============================================================ -->
+<!-- JS: Timetable logic -->
+<!-- ============================================================ -->
+<script>
+const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+
+function ttAdd() {
+  const subject = document.getElementById('tt-subject').value.trim();
+  const day = document.getElementById('tt-day').value;
+  const start = document.getElementById('tt-start').value;
+  const end = document.getElementById('tt-end').value;
+  const roomSel = document.getElementById('tt-room');
+  const roomId = parseInt(roomSel.value) || 0;
+  const location = roomId ? ROOMS[roomId-1].label : '';
+  const notes = document.getElementById('tt-notes').value.trim();
+
+  const msg = (t) => { const el = document.getElementById('tt-msg'); el.classList.remove('hidden'); el.textContent = t; };
+
+  if (!subject) { msg('Enter an event or subject name.'); return; }
+  if (!start || !end || end <= start) { msg('End time must be later than start time.'); return; }
+  const overlap = timetable.find(e => e.day === day && start < e.end && end > e.start);
+  if (overlap) { msg('This session overlaps another saved session.'); return; }
+
+  timetable.push({ subject, day, start, end, roomId, location, notes });
+  msg('Session saved ✓');
+  document.getElementById('tt-subject').value = '';
+  document.getElementById('tt-notes').value = '';
+  renderTimetable();
+}
+
+function renderTimetable() {
+  // Init room select
+  const tr = document.getElementById('tt-room');
+  if (tr && tr.options.length < 2) {
+    tr.innerHTML = '<option value="">— none —</option>' + ROOMS.map(r => `<option value="${r.id}">${r.label}</option>`).join('');
+  }
+
+  const el = document.getElementById('tt-grid');
+  if (!el) return;
+  if (timetable.length === 0) {
+    el.innerHTML = '<p class="text-sm text-muted-foreground rounded-lg border border-dashed p-8 text-center">No sessions yet. Add your first session above.</p>';
+    return;
+  }
+  const byDay = {};
+  DAYS.forEach(d => byDay[d] = timetable.filter(e => e.day === d));
+  el.innerHTML = DAYS.filter(d => byDay[d].length > 0).map(day => `
+    <div>
+      <h3 class="font-semibold text-sm mb-2">${day}</h3>
+      <div class="flex flex-col gap-2">
+        ${byDay[day].sort((a,b) => a.start.localeCompare(b.start)).map(e => `
+          <div class="flex items-center justify-between gap-3 rounded-lg border bg-background p-3">
+            <div class="flex flex-col gap-0.5">
+              <span class="font-medium text-sm">${e.subject}</span>
+              <span class="text-xs text-muted-foreground">${e.start} – ${e.end}${e.location ? ' · ' + e.location : ''}${e.notes ? ' · ' + e.notes : ''}</span>
+            </div>
+            <button onclick="ttDelete('${e.subject}','${e.day}','${e.start}')" class="text-xs text-red-500 hover:text-red-700">✕</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+function ttDelete(subject, day, start) {
+  timetable = timetable.filter(e => !(e.subject === subject && e.day === day && e.start === start));
+  renderTimetable();
+}
+</script>
+
+</body>
+</html>
