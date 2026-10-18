@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>NaviJac – Indoor Navigation & Dynamic Route Finder</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        primary: { DEFAULT: '#7c3aed', foreground: '#fff' },
+        muted: { DEFAULT: '#f5f5f4', foreground: '#78716c' },
+        card: { DEFAULT: '#fff', foreground: '#1c1917' },
+        border: '#e7e5e4',
+        background: '#fff',
+        foreground: '#1c1917',
+      }
+    }
+  }
+}
+</script>
+<style>
+  :root { --primary:#7c3aed; }
+  .dark { background:#0c0a09; color:#fafaf9; }
+  .dark .bg-background { background:#0c0a09 !important; }
+  .dark .bg-card { background:#1c1917 !important; }
+  .dark .bg-muted\/40 { background:rgba(28,25,23,.4) !important; }
+  .dark .bg-muted { background:#292524 !important; }
+  .dark .border { border-color:#292524 !important; }
+  .dark .text-muted-foreground { color:#a8a29e !important; }
+  .dark .text-foreground { color:#fafaf9 !important; }
+  .dark select, .dark input { background:#1c1917 !important; color:#fafaf9 !important; border-color:#292524 !important; }
+  .dark .border-amber-300 { border-color:#92400e !important; }
+  .dark .bg-amber-50 { background:#1c1408 !important; }
+  .dark .text-amber-950 { color:#fcd34d !important; }
+  .page { display:none; }
+  .page.active { display:block; }
+  select, input { outline:none; }
+  .pulse-dot { animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1; transform:scale(1);} 50%{opacity:.6; transform:scale(1.2);} }
+  .route-line {
+    stroke-dasharray: 10 7;
+    animation: routeDash 1.2s linear infinite;
+  }
+  @keyframes routeDash {
+    to { stroke-dashoffset: -34; }
+  }
+  .route-glow {
+    animation: glowPulse 2s ease-in-out infinite alternate;
+  }
+  @keyframes glowPulse {
+    from { stroke-opacity: 0.35; stroke-width: 8px; }
+    to { stroke-opacity: 0.65; stroke-width: 11px; }
+  }
+  .room-hover {
+    transition: all 0.2s ease;
+  }
+  .room-hover:hover {
+    fill-opacity: 0.35 !important;
+    stroke-width: 3px !important;
+    cursor: pointer;
+  }
+  .plan-img-blueprint {
+    filter: contrast(1.15) brightness(0.98);
+  }
+  .dark .plan-img-blueprint {
+    filter: invert(0.92) hue-rotate(180deg) contrast(1.2) brightness(0.9);
+  }
+  .floor-tab-active {
+    background-color: #7c3aed !important;
+    color: #ffffff !important;
+    border-color: #7c3aed !important;
+  }
+</style>
+</head>
+<body class="bg-muted/40 text-foreground min-h-screen font-sans transition-colors">
+
+<!-- ========== SCRIPT DATA & CORE ROUTING ENGINE ========== -->
+<script>
+// ---- Theme ----
+const savedTheme = localStorage.getItem('theme');
+if (savedTheme === 'dark' || (!savedTheme && matchMedia('(prefers-color-scheme:dark)').matches)) {
+  document.documentElement.classList.add('dark');
+}
+function toggleTheme() {
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  document.querySelectorAll('.theme-icon').forEach(el => {
+    el.textContent = isDark ? '☀️' : '🌙';
+  });
+  if (currentFloor !== undefined) renderRouteMap();
+}
+
+// ---- Router ----
+function nav(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const target = document.getElementById('page-' + page);
+  if (target) target.classList.add('active');
+  window.scrollTo(0, 0);
+  if (page === 'route') initRoutePage();
+  if (page === 'home') initHomePage();
+  if (page === 'editor') initEditorPage();
+  if (page === 'timetable') renderTimetable();
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  nav('route');
+  document.querySelectorAll('.theme-icon').forEach(el => {
+    el.textContent = document.documentElement.classList.contains('dark') ? '☀️' : '🌙';
+  });
+});
+
+// =================================================================
+// ARCHITECTURAL FLOOR DATA & WALKABLE NAVIGATION GRAPH
+// =================================================================
+const FLOORS = {
+  0: {
+    id: 0,
+    name: 'Ground Floor',
+    code: 'L0',
+    title: 'Dr. L. H. Sumanadasa Building · Ground Floor',
+    subtitle: 'Electrical Engineering & Library · University of Moratuwa',
+    img: 'ground_floor.png',
+    width: 745,
+    height: 542,
+    scaleMPerPx: 0.091, // 1 px ≈ 0.091 m
+  },
+  1: {
+    id: 1,
+    name: 'First Floor',
+    code: 'L1',
+    title: 'Dr. L. H. Sumanadasa Building · First Floor',
+    subtitle: 'Auditorium, Labs & Library Stacks · University of Moratuwa',
+    img: 'first_floor.png',
+    width: 838,
+    height: 627,
+    scaleMPerPx: 0.088,
+  }
+};
+
+let currentFloor = 0;
+let mapMode = 'blueprint'; // 'blueprint' or 'vector'
+
+// Rooms definitions
+const ALL_ROOMS = [
+  // --- GROUND FLOOR ROOMS (floor: 0) ---
+  { id: 'g1',  num: 1,  floor: 0, name: 'IT unit (NDT)',           label: 'IT unit (NDT)',          center: [170, 130], door: [250, 190], box: [80, 70, 172, 85],   color: '#e0e7ff', desc: 'NDT Division IT Resource Center' },
+  { id: 'g2',  num: 2,  floor: 0, name: 'Female toilet',            label: 'Toilet · female',        center: [125, 225], door: [164, 225], box: [82, 195, 82, 55],   color: '#fce7f3', desc: 'Restroom (Female)' },
+  { id: 'g3',  num: 3,  floor: 0, name: 'Store room',               label: 'Store room',             center: [210, 225], door: [210, 260], box: [165, 195, 85, 60],  color: '#fef3c7', desc: 'Ground Floor Equipment Storage' },
+  { id: 'g4',  num: 4,  floor: 0, name: 'Male toilet',              label: 'Toilet · male',          center: [125, 335], door: [125, 395], box: [82, 252, 82, 140],  color: '#e0f2fe', desc: 'Restroom (Male)' },
+  { id: 'g5',  num: 5,  floor: 0, name: 'Computer lab (RCDF)',      label: 'Computer lab (RCDF)',    center: [420, 130], door: [340, 170], box: [335, 70, 172, 90],  color: '#ede9fe', desc: 'Research & Computer Lab' },
+  { id: 'g6',  num: 6,  floor: 0, name: 'Seminar room (ITSDL)',     label: 'Seminar room (ITSDL)',   center: [590, 130], door: [508, 170], box: [508, 70, 168, 105], color: '#e0e7ff', desc: 'IT Skills Development Lab' },
+  { id: 'g7',  num: 7,  floor: 0, name: 'Staff lounge',             label: 'Staff lounge',           center: [465, 220], door: [425, 265], box: [422, 175, 86, 85],  color: '#fef3c7', desc: 'Faculty & Department Staff Lounge' },
+  { id: 'g8',  num: 8,  floor: 0, name: 'Ladies lunch room',        label: 'Ladies lunch room',      center: [590, 220], door: [508, 265], box: [508, 175, 168, 85], color: '#fce7f3', desc: 'Staff Lunch Area' },
+  { id: 'g9',  num: 9,  floor: 0, name: 'Library lobby',            label: 'Lobby / Circulation',    center: [360, 320], door: [360, 320], box: [285, 275, 220, 90], color: '#ecfdf5', desc: 'Central Circulation & Open Lobby' },
+  { id: 'g10', num: 10, floor: 0, name: 'Bindery section',         label: 'Bindery section',        center: [170, 445], door: [180, 395], box: [82, 395, 170, 100], color: '#f1f5f9', desc: 'Library Bookbinding Division' },
+  { id: 'g11', num: 11, floor: 0, name: 'Bindery stores',          label: 'Bindery stores',         center: [295, 445], door: [330, 395], box: [253, 395, 82, 100], color: '#f1f5f9', desc: 'Bindery Material Stores' },
+  { id: 'g12', num: 12, floor: 0, name: 'AQ stores',               label: 'AQ stores',              center: [377, 445], door: [377, 395], box: [335, 395, 85, 100], color: '#f1f5f9', desc: 'Acquisition & Storage Division' },
+  { id: 'g13', num: 13, floor: 0, name: 'Technical services div.', label: 'Technical services',     center: [505, 445], door: [505, 395], box: [420, 395, 170, 100],color: '#ede9fe', desc: 'Library Technical Services Division' },
+  { id: 'g14', num: 14, floor: 0, name: 'Gents lunch room',        label: 'Gents lunch room',       center: [635, 445], door: [595, 395], box: [590, 395, 85, 100], color: '#e0f2fe', desc: 'Staff Lunch Area' },
+  { id: 'g_sw',num: 15, floor: 0, name: 'West Staircase',          label: 'West Stairs (to L1)',    center: [205, 317], door: [250, 317], box: [168, 275, 75, 85],  color: '#fef08a', desc: 'Stairs to First Floor (Discussion room)', isStairs: true, connectsTo: 'f_sw' },
+  { id: 'g_se',num: 16, floor: 0, name: 'East Staircase',          label: 'East Stairs (to L1)',    center: [550, 317], door: [508, 317], box: [508, 275, 85, 85],  color: '#fef08a', desc: 'Stairs to First Floor (Auditorium & Shelves)', isStairs: true, connectsTo: 'f_se' },
+
+  // --- FIRST FLOOR ROOMS (floor: 1) ---
+  { id: 'f1',  num: 101, floor: 1, name: 'Discussion room',            label: 'Discussion room',          center: [170, 180], door: [270, 260], box: [70, 65, 200, 230],  color: '#e0e7ff', desc: 'Collaborative Group Study Area' },
+  { id: 'f2',  num: 102, floor: 1, name: 'Computer laboratory',         label: 'Computer laboratory',      center: [400, 180], door: [390, 295], box: [270, 65, 250, 230], color: '#ede9fe', desc: '1st Floor Computer Workstations' },
+  { id: 'f3',  num: 103, floor: 1, name: 'Auditorium (100 chairs)',     label: 'Auditorium',               center: [630, 180], door: [535, 295], box: [520, 65, 215, 230], color: '#fef3c7', desc: '100-Seat Lecture & Event Hall' },
+  { id: 'f4',  num: 104, floor: 1, name: 'First Floor Lobby / TV',      label: 'Lobby / TV area',          center: [400, 360], door: [400, 360], box: [270, 305, 250, 95], color: '#ecfdf5', desc: 'Central First Floor Lounge' },
+  { id: 'f5',  num: 105, floor: 1, name: 'Periodicals & 40 Shelves',    label: 'Periodicals & Stacks',     center: [450, 520], door: [420, 410], box: [330, 400, 230, 180],color: '#f1f5f9', desc: 'Journal Collection & Reading Stacks' },
+  { id: 'f6',  num: 106, floor: 1, name: 'Thesis collection & 35 Shelves', label: 'Thesis collection',     center: [630, 520], door: [560, 410], box: [560, 400, 175, 180],color: '#f1f5f9', desc: 'Graduate Theses & Archive' },
+  { id: 'f7',  num: 107, floor: 1, name: 'Diandas & A/L section',       label: 'Diandas / A/L',            center: [200, 520], door: [280, 410], box: [80, 400, 190, 180], color: '#e0f2fe', desc: 'Special Study & Examination Section' },
+  { id: 'f8',  num: 108, floor: 1, name: 'Photocopy & Vending unit',    label: 'Photocopy unit',           center: [550, 360], door: [510, 360], box: [500, 340, 90, 60],  color: '#fce7f3', desc: 'Self-Service Print & Refreshment Unit' },
+  { id: 'f_sw',num: 109, floor: 1, name: 'West Staircase',              label: 'West Stairs (to L0)',      center: [205, 350], door: [250, 350], box: [168, 305, 75, 85],  color: '#fef08a', desc: 'Stairs down to Ground Floor', isStairs: true, connectsTo: 'g_sw' },
+  { id: 'f_se',num: 110, floor: 1, name: 'East Staircase',              label: 'East Stairs (to L0)',      center: [575, 350], door: [535, 350], box: [535, 305, 85, 85],  color: '#fef08a', desc: 'Stairs down to Ground Floor', isStairs: true, connectsTo: 'g_se' }
+];
+
+// Graph Nodes & Walkable Edges
+const GRAPH_NODES = {
+  // Ground floor room centers & doors
+  'g1': [170, 130], 'd_g1': [250, 190],
+  'g2': [125, 225], 'd_g2': [164, 225],
+  'g3': [210, 225], 'd_g3': [210, 260],
+  'g4': [125, 335], 'd_g4': [125, 395],
+  'g5': [420, 130], 'd_g5': [340, 170],
+  'g6': [590, 130], 'd_g6': [508, 170],
+  'g7': [465, 220], 'd_g7': [425, 265],
+  'g8': [590, 220], 'd_g8': [508, 265],
+  'g9': [360, 320],
+  'g10': [170, 445], 'd_g10': [180, 395],
+  'g11': [295, 445], 'd_g11': [330, 395],
+  'g12': [377, 445], 'd_g12': [377, 395],
+  'g13': [505, 445], 'd_g13': [505, 395],
+  'g14': [635, 445], 'd_g14': [595, 395],
+  'g_sw': [205, 317], 'd_sw': [250, 317],
+  'g_se': [550, 317], 'd_se': [508, 317],
+
+  // Ground floor corridor waypoints
+  'w_w1': [250, 225], 'w_w2': [250, 260], 'w_w3': [250, 317],
+  'w_w4': [215, 395], 'w_w5': [250, 395],
+  'w_c1': [360, 320], 'w_c2': [295, 320], 'w_c3': [425, 320],
+  'w_n1': [360, 200], 'w_n2': [425, 265], 'w_n3': [508, 200],
+  'w_e1': [508, 320], 'w_e2': [595, 340],
+  'w_s1': [330, 395], 'w_s2': [377, 395], 'w_s3': [505, 395], 'w_s4': [595, 395],
+
+  // First floor room centers & doors
+  'f1': [170, 180], 'd_f1': [270, 260],
+  'f2': [400, 180], 'd_f2': [390, 295],
+  'f3': [630, 180], 'd_f3': [535, 295],
+  'f4': [400, 360],
+  'f5': [450, 520], 'd_f5': [420, 410],
+  'f6': [630, 520], 'd_f6': [560, 410],
+  'f7': [200, 520], 'd_f7': [280, 410],
+  'f8': [550, 360], 'd_f8': [510, 360],
+  'f_sw': [205, 350], 'd_f_sw': [250, 350],
+  'f_se': [575, 350], 'd_f_se': [535, 350],
+
+  // First floor corridor waypoints
+  'fw_c1': [400, 360], 'fw_w1': [270, 360], 'fw_e1': [535, 360],
+  'fw_s1': [280, 410], 'fw_s2': [420, 410], 'fw_s3': [560, 410],
+  'fw_n1': [390, 295], 'fw_n2': [535, 295], 'fw_w_door': [270, 260]
+};
+
+const GRAPH_EDGES = [
+  // --- GROUND FLOOR ---
+  // Room to Door
+  ['g1', 'd_g1'], ['g2', 'd_g2'], ['g3', 'd_g3'], ['g4', 'd_g4'],
+  ['g5', 'd_g5'], ['g6', 'd_g6'], ['g7', 'd_g7'], ['g8', 'd_g8'],
+  ['g10', 'd_g10'], ['g11', 'd_g11'], ['g12', 'd_g12'], ['g13', 'd_g13'],
+  ['g14', 'd_g14'], ['g_sw', 'd_sw'], ['g_se', 'd_se'],
+  // Door to Corridor Waypoints
+  ['d_g1', 'w_w1'], ['d_g2', 'w_w1'], ['d_g3', 'w_w2'], ['w_w1', 'w_w2'],
+  ['w_w2', 'w_w3'], ['d_sw', 'w_w3'], ['w_w3', 'w_c2'],
+  ['d_g4', 'w_w4'], ['d_g10', 'w_w4'], ['w_w4', 'w_w5'], ['w_w5', 'w_w3'],
+  ['w_w5', 'w_s1'], ['w_s1', 'd_g11'], ['w_s1', 'w_s2'], ['w_s2', 'd_g12'],
+  ['w_s2', 'w_s3'], ['w_s3', 'd_g13'], ['w_s3', 'w_s4'], ['w_s4', 'd_g14'],
+  ['w_s4', 'w_e2'], ['w_e2', 'w_e1'], ['w_e1', 'd_se'], ['w_e1', 'd_g8'],
+  ['w_e1', 'w_c3'], ['w_c3', 'w_c1'], ['w_c1', 'w_c2'], ['w_c1', 'g9'],
+  ['w_c1', 'w_s2'], ['w_c1', 'w_n1'], ['w_n1', 'd_g5'],
+  ['w_c3', 'w_n2'], ['w_n2', 'd_g7'], ['w_e1', 'w_n3'], ['w_n3', 'd_g6'],
+
+  // --- FIRST FLOOR ---
+  // Room to Door
+  ['f1', 'd_f1'], ['f2', 'd_f2'], ['f3', 'd_f3'],
+  ['f5', 'd_f5'], ['f6', 'd_f6'], ['f7', 'd_f7'], ['f8', 'd_f8'],
+  ['f_sw', 'd_f_sw'], ['f_se', 'd_f_se'],
+  // Corridor connections
+  ['d_f1', 'fw_w_door'], ['fw_w_door', 'fw_w1'],
+  ['d_f_sw', 'fw_w1'], ['fw_w1', 'fw_c1'], ['fw_c1', 'f4'],
+  ['fw_c1', 'fw_e1'], ['fw_e1', 'd_f_se'], ['fw_e1', 'd_f8'],
+  ['fw_c1', 'fw_n1'], ['fw_n1', 'd_f2'],
+  ['fw_e1', 'fw_n2'], ['fw_n2', 'd_f3'],
+  ['fw_w1', 'fw_s1'], ['fw_s1', 'd_f7'],
+  ['fw_c1', 'fw_s2'], ['fw_s2', 'd_f5'],
+  ['fw_e1', 'fw_s3'], ['fw_s3', 'd_f6'],
+  ['fw_s1', 'fw_s2'], ['fw_s2', 'fw_s3'],
+
+  // --- VERTICAL STAIR CONNECTIONS ---
+  ['g_sw', 'f_sw'], // West stairs
+  ['g_se', 'f_se'], // East stairs
+];
+
+// Build adjacency matrix with Euclidean weights
+const ADJ = {};
+Object.keys(GRAPH_NODES).forEach(k => ADJ[k] = []);
+GRAPH_EDGES.forEach(([u, v]) => {
+  if (!GRAPH_NODES[u] || !GRAPH_NODES[v]) return;
+  const p1 = GRAPH_NODES[u], p2 = GRAPH_NODES[v];
+  let dist = Math.hypot(p1[0] - p2[0], p1[1] - p2[1]);
+  // Vertical stairs cost penalty (walking up/down stairs takes ~15 m equivalent effort)
+  if ((u === 'g_sw' && v === 'f_sw') || (u === 'g_se' && v === 'f_se')) dist = 180;
+  ADJ[u].push({ to: v, cost: dist });
+  ADJ[v].push({ to: u, cost: dist });
+});
+
+// Dijkstra Shortest Path Search
+function findShortestRoute(startId, endId) {
+  if (!startId || !endId || startId === endId) return null;
+  const dist = {}, prev = {}, visited = new Set();
+  Object.keys(GRAPH_NODES).forEach(k => dist[k] = Infinity);
+  dist[startId] = 0;
+  const q = new Set(Object.keys(GRAPH_NODES));
+
+  while (q.size > 0) {
+    let u = null, minD = Infinity;
+    q.forEach(node => {
+      if (dist[node] < minD) { minD = dist[node]; u = node; }
+    });
+    if (!u || minD === Infinity) break;
+    if (u === endId) break;
+    q.delete(u);
+    visited.add(u);
+
+    (ADJ[u] || []).forEach(({ to, cost }) => {
+      if (visited.has(to)) return;
+      const alt = dist[u] + cost;
+      if (alt < dist[to]) {
+        dist[to] = alt;
+        prev[to] = u;
+      }
+    });
+  }
+
+  if (dist[endId] === Infinity) return null;
+
+  const path = [];
+  let curr = endId;
+  while (curr) {
+    path.unshift(curr);
+    curr = prev[curr];
+  }
+
+  // Generate coordinates & turn-by-turn instructions
+  const coords = path.map(id => GRAPH_NODES[id]);
+  const startRoom = ALL_ROOMS.find(r => r.id === startId);
+  const endRoom = ALL_ROOMS.find(r => r.id === endId);
+  const isMultiFloor = startRoom && endRoom && startRoom.floor !== endRoom.floor;
+
+  // Approximate meters
+  const scale = FLOORS[startRoom ? startRoom.floor : 0].scaleMPerPx;
+  let totalPx = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    totalPx += Math.hypot(coords[i+1][0] - coords[i][0], coords[i+1][1] - coords[i][1]);
+  }
+  const distanceM = Math.round(totalPx * scale * 10) / 10;
+  const walkSec = Math.round(distanceM / 1.15); // ~1.15 m/s
+
+  // Human-friendly instructions
+  const instructions = [];
+  instructions.push(`Start at ${startRoom ? startRoom.name : 'Starting point'}`);
+  if (path.length > 2) {
+    instructions.push(`Exit through doorway into corridor`);
+    if (isMultiFloor) {
+      const stairNode = path.find(id => id.includes('_s'));
+      const stairName = stairNode && stairNode.includes('sw') ? 'West Staircase' : 'East Staircase';
+      instructions.push(`Head towards ${stairName} and take the stairs to ${FLOORS[endRoom.floor].name}`);
+    } else {
+      instructions.push(`Follow hallway past circulation lobby towards ${endRoom ? endRoom.name : 'destination'}`);
+    }
+    instructions.push(`Enter ${endRoom ? endRoom.name : 'destination'} through the indicated entrance`);
+  }
+  instructions.push(`Arrive at ${endRoom ? endRoom.name : 'Destination'}`);
+
+  return {
+    path,
+    coords,
+    distanceM,
+    walkSec,
+    instructions,
+    startRoom,
+    endRoom,
+    isMultiFloor
+  };
+}
+</script>
+
+<!-- ============================================================ -->
+<!-- TOP HEADER BAR -->
+<!-- ============================================================ -->
+<header class="border-b bg-background sticky top-0 z-30 shadow-xs">
+  <div class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-8">
+    <a href="#" onclick="nav('home')" class="flex items-center gap-3 no-underline text-foreground">
+      <span class="flex size-9 items-center justify-center rounded-xl bg-violet-700 text-white font-bold shadow-xs">N</span>
+      <span class="text-lg font-semibold tracking-tight">NaviJac</span>
+      <span class="hidden sm:inline-flex text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 font-medium dark:bg-violet-950 dark:text-violet-300">Indoor Navigation</span>
+    </a>
+    <div class="flex items-center gap-3">
+      <button onclick="nav('route')" class="text-sm font-medium text-violet-700 dark:text-violet-400 hover:underline">Route Finder</button>
+      <button onclick="nav('timetable')" class="text-sm font-medium text-muted-foreground hover:text-foreground">Timetable</button>
+      <button onclick="nav('creator')" class="text-sm font-medium text-muted-foreground hover:text-foreground">Creator</button>
+      <button onclick="toggleTheme()" class="rounded-lg border px-2.5 py-1 text-sm hover:bg-muted transition" title="Toggle Light/Dark Theme">
+        <span class="theme-icon">🌙</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ============================================================ -->
+<!-- PAGE: ROUTE FINDER WITH DYNAMIC OVERLAY -->
+<!-- ============================================================ -->
+<div id="page-route" class="page active">
+  <main class="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-8">
+    
+    <!-- Title and floor stats bar -->
+    <section class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="text-2xl font-bold tracking-tight">Indoor Navigation & Dynamic Route Finder</h1>
+          <span class="inline-flex items-center rounded-md border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300">Live Blueprint Overlay</span>
+        </div>
+        <p class="mt-1 text-sm text-muted-foreground" id="floor-header-desc">
+          Dr. L. H. Sumanadasa Building · Electrical Engineering & Library Ground Floor
+        </p>
+      </div>
+
+      <!-- Controls: Floor switcher & map view mode -->
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="inline-flex rounded-lg border p-1 bg-card shadow-xs">
+          <button id="tab-floor-0" onclick="switchFloor(0)" class="floor-tab-active px-3 py-1.5 text-xs font-semibold rounded-md transition">Ground Floor (L0)</button>
+          <button id="tab-floor-1" onclick="switchFloor(1)" class="px-3 py-1.5 text-xs font-semibold rounded-md transition text-muted-foreground hover:text-foreground">First Floor (L1)</button>
+        </div>
+        <div class="inline-flex rounded-lg border p-1 bg-card shadow-xs">
+          <button id="tab-mode-bp" onclick="setMapMode('blueprint')" class="floor-tab-active px-3 py-1.5 text-xs font-semibold rounded-md transition">Architectural Plan</button>
+          <button id="tab-mode-vec" onclick="setMapMode('vector')" class="px-3 py-1.5 text-xs font-semibold rounded-md transition text-muted-foreground hover:text-foreground">Vector Schematic</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Navigation Grid -->
+    <div class="grid gap-6 lg:grid-cols-[1fr_22rem]">
+      
+      <!-- Interactive SVG Map Display -->
+      <section class="flex flex-col gap-3 rounded-2xl border bg-card p-4 sm:p-5 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
+          <div class="flex items-center gap-2">
+            <span class="flex size-3 rounded-full bg-emerald-500 pulse-dot"></span>
+            <span class="text-sm font-semibold" id="active-floor-badge">Ground Floor · Walkable Network Active</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs text-muted-foreground">
+            <span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-blue-600"></span> Start</span>
+            <span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-red-600"></span> Destination</span>
+            <span class="inline-flex items-center gap-1"><span class="size-2 rounded-full bg-purple-600"></span> Path</span>
+          </div>
+        </div>
+
+        <!-- SVG Container with dynamic dimensions -->
+        <div class="relative overflow-hidden rounded-xl border bg-slate-950/5 dark:bg-black/20 p-1 flex items-center justify-center min-h-[460px]">
+          <svg id="route-svg" viewBox="0 0 745 542" class="w-full h-auto max-h-[640px] select-none block" role="img" aria-label="Interactive Indoor Navigation Map"></svg>
+
+          <!-- Floating room tooltip -->
+          <div id="room-tooltip" class="absolute pointer-events-none hidden rounded-md bg-slate-900/90 text-white text-xs px-2.5 py-1.5 shadow-lg backdrop-blur border border-slate-700 z-20"></div>
+        </div>
+
+        <!-- Map footer help text -->
+        <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground pt-1">
+          <span>💡 <strong>Tip:</strong> Click any room on the plan to set your starting location or destination.</span>
+          <span id="scale-indicator">Grid scale: ~0.091 m/px</span>
+        </div>
+      </section>
+
+      <!-- Navigation Sidebar & Directions -->
+      <aside class="flex flex-col gap-5">
+        
+        <!-- Selection Card -->
+        <div class="rounded-2xl border bg-card p-5 shadow-sm">
+          <h2 class="text-base font-semibold">Plan Your Route</h2>
+          <p class="text-xs text-muted-foreground mb-4">Choose starting room and destination</p>
+
+          <div class="flex flex-col gap-3">
+            <!-- Start Point Selector -->
+            <div>
+              <label class="block text-xs font-medium text-muted-foreground mb-1">📍 Starting Location</label>
+              <select id="start-select" onchange="onSelectStart(this.value)" class="w-full h-10 rounded-lg border bg-background px-3 text-sm font-medium">
+                <option value="">Select starting room...</option>
+              </select>
+            </div>
+
+            <!-- Swap button -->
+            <div class="flex justify-center -my-1">
+              <button onclick="swapRoute()" class="rounded-full border p-1.5 hover:bg-muted text-muted-foreground hover:text-foreground transition shadow-2xs" title="Swap Start and Destination">
+                ⇄ Swap Points
+              </button>
+            </div>
+
+            <!-- Destination Selector -->
+            <div>
+              <label class="block text-xs font-medium text-muted-foreground mb-1">🎯 Destination</label>
+              <select id="dest-select" onchange="onSelectDest(this.value)" class="w-full h-10 rounded-lg border bg-background px-3 text-sm font-medium">
+                <option value="">Select destination room...</option>
+              </select>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="grid grid-cols-2 gap-2 mt-2">
+              <button id="btn-directions" onclick="calculateRoute()" class="w-full rounded-lg bg-violet-700 py-2.5 text-xs font-semibold text-white hover:bg-violet-800 transition disabled:opacity-50">
+                Get Directions
+              </button>
+              <button onclick="clearRoute()" class="w-full rounded-lg border py-2.5 text-xs font-semibold hover:bg-muted transition text-muted-foreground">
+                Reset
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Directions & Route Output Card -->
+        <div class="rounded-2xl border bg-card p-5 shadow-sm flex flex-col gap-4">
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-semibold">Turn-by-Turn Route</h2>
+            <span id="route-stat-badge" class="hidden inline-flex items-center rounded-full bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300 px-2.5 py-0.5 text-xs font-bold"></span>
+          </div>
+
+          <!-- Empty state -->
+          <div id="route-empty-state" class="flex flex-col items-center justify-center p-6 text-center border border-dashed rounded-xl text-muted-foreground">
+            <span class="text-2xl mb-2">🧭</span>
+            <p class="text-sm font-medium">No route active</p>
+            <p class="text-xs mt-1">Select a starting room and destination to calculate the shortest indoor path.</p>
+          </div>
+
+          <!-- Active route details -->
+          <div id="route-active-details" class="hidden flex flex-col gap-3">
+            <!-- Stats -->
+            <div class="grid grid-cols-2 gap-2 p-3 bg-muted/50 rounded-xl text-center">
+              <div>
+                <p class="text-xs text-muted-foreground">Estimated Distance</p>
+                <p class="text-lg font-bold text-violet-700 dark:text-violet-400" id="stat-dist">0 m</p>
+              </div>
+              <div>
+                <p class="text-xs text-muted-foreground">Walking Time</p>
+                <p class="text-lg font-bold text-violet-700 dark:text-violet-400" id="stat-time">0 s</p>
+              </div>
+            </div>
+
+            <!-- Steps list -->
+            <div class="flex flex-col gap-2 mt-1">
+              <p class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Navigation Steps</p>
+              <div id="steps-container" class="flex flex-col gap-2 max-h-60 overflow-y-auto pr-1"></div>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+    </div>
+  </main>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAGE: HOME DIRECTORY -->
+<!-- ============================================================ -->
+<div id="page-home" class="page">
+  <main class="mx-auto flex w-full max-w-7xl flex-col gap-8 px-5 py-7 sm:px-8 sm:py-10">
+    <section class="grid items-center gap-8 rounded-2xl border bg-card p-6 shadow-sm md:grid-cols-2 md:p-9">
+      <div class="flex flex-col items-start gap-5">
+        <span class="inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold">Indoor Navigation System</span>
+        <h1 class="text-4xl font-semibold leading-tight tracking-tight md:text-5xl">Interactive Indoor Maps for Sumanadasa Building.</h1>
+        <p class="max-w-2xl text-base leading-relaxed text-muted-foreground">Explore university building schematics, locate classrooms, offices, and study spaces, and follow verified walking routes with animated corridor guidance.</p>
+        <div class="flex flex-wrap gap-3">
+          <button onclick="nav('route')" class="inline-flex items-center rounded-lg bg-violet-700 px-5 py-2.5 text-sm font-semibold text-white shadow hover:bg-violet-800 transition">Open Interactive Map</button>
+          <button onclick="switchFloor(1); nav('route')" class="inline-flex items-center rounded-lg border px-5 py-2.5 text-sm font-semibold hover:bg-muted transition">Explore First Floor</button>
+        </div>
+      </div>
+      <div class="rounded-xl border bg-card overflow-hidden shadow-sm p-4">
+        <h3 class="font-semibold text-base mb-1">Featured Campus Building</h3>
+        <p class="text-xs text-muted-foreground mb-3">Dr. L. H. Sumanadasa Building · Department of Electrical Engineering & Library</p>
+        <div class="rounded-lg overflow-hidden border">
+          <img src="ground_floor.png" alt="Ground floor map" class="w-full h-auto object-cover max-h-64"/>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ============================================================ -->
+<!-- JAVASCRIPT: DYNAMIC ROUTE FINDER CONTROLLER -->
+<!-- ============================================================ -->
+<script>
+let selStartId = '';
+let selDestId = '';
+let activeRoute = null;
+
+function switchFloor(fId) {
+  currentFloor = fId;
+  const f = FLOORS[currentFloor];
+  
+  // Update tabs UI
+  document.getElementById('tab-floor-0').className = fId === 0 ? 'floor-tab-active px-3 py-1.5 text-xs font-semibold rounded-md transition' : 'px-3 py-1.5 text-xs font-semibold rounded-md transition text-muted-foreground hover:text-foreground';
+  document.getElementById('tab-floor-1').className = fId === 1 ? 'floor-tab-active px-3 py-1.5 text-xs font-semibold rounded-md transition' : 'px-3 py-1.5 text-xs font-semibold rounded-md transition text-muted-foreground hover:text-foreground';
+  
+  document.getElementById('floor-header-desc').textContent = `${f.title} · ${f.subtitle}`;
+  document.getElementById('active-floor-badge').textContent = `${f.name} · Walkable Network Active`;
+  document.getElementById('scale-indicator').textContent = `Grid scale: ~${f.scaleMPerPx} m/px`;
+
+  // Update SVG viewBox
+  const svg = document.getElementById('route-svg');
+  if (svg) svg.setAttribute('viewBox', `0 0 ${f.width} ${f.height}`);
+
+  populateDropdowns();
+  renderRouteMap();
+}
+
+function setMapMode(mode) {
+  mapMode = mode;
+  document.getElementById('tab-mode-bp').className = mode === 'blueprint' ? 'floor-tab-active px-3 py-1.5 text-xs font-semibold rounded-md transition' : 'px-3 py-1.5 text-xs font-semibold rounded-md transition text-muted-foreground hover:text-foreground';
+  document.getElementById('tab-mode-vec').className = mode === 'vector' ? 'floor-tab-active px-3 py-1.5 text-xs font-semibold rounded-md transition' : 'px-3 py-1.5 text-xs font-semibold rounded-md transition text-muted-foreground hover:text-foreground';
+  renderRouteMap();
+}
+
+function populateDropdowns() {
+  const ss = document.getElementById('start-select');
+  const ds = document.getElementById('dest-select');
+  if (!ss || !ds) return;
+
+  const currentRooms = ALL_ROOMS.filter(r => r.floor === currentFloor);
+  const otherRooms = ALL_ROOMS.filter(r => r.floor !== currentFloor);
+
+  function makeGroup(title, list) {
+    let html = `<optgroup label="${title}">`;
+    list.forEach(r => {
+      html += `<option value="${r.id}">${r.label}</option>`;
+    });
+    html += `</optgroup>`;
+    return html;
+  }
+
+  const optionsHtml = '<option value="">-- Choose a location --</option>' +
+    makeGroup(FLOORS[currentFloor].name, currentRooms) +
+    makeGroup(FLOORS[currentFloor === 0 ? 1 : 0].name + ' (Other Floor)', otherRooms);
+
+  ss.innerHTML = optionsHtml;
+  ds.innerHTML = optionsHtml;
+
+  if (selStartId) ss.value = selStartId;
+  if (selDestId) ds.value = selDestId;
+}
+
+function onSelectStart(val) {
+  selStartId = val;
+  const room = ALL_ROOMS.find(r => r.id === val);
+  if (room && room.floor !== currentFloor) {
+    switchFloor(room.floor);
+  }
+  if (selStartId && selDestId) calculateRoute();
+  else renderRouteMap();
+}
+
+function onSelectDest(val) {
+  selDestId = val;
+  if (selStartId && selDestId) calculateRoute();
+  else renderRouteMap();
+}
+
+function swapRoute() {
+  const tmp = selStartId;
+  selStartId = selDestId;
+  selDestId = tmp;
+  populateDropdowns();
+  if (selStartId && selDestId) calculateRoute();
+  else renderRouteMap();
+}
+
+function clearRoute() {
+  selStartId = '';
+  selDestId = '';
+  activeRoute = null;
+  populateDropdowns();
+  document.getElementById('route-empty-state').classList.remove('hidden');
+  document.getElementById('route-active-details').classList.add('hidden');
+  document.getElementById('route-stat-badge').classList.add('hidden');
+  renderRouteMap();
+}
+
+function onRoomClick(roomId) {
+  if (!selStartId) {
+    selStartId = roomId;
+    const ss = document.getElementById('start-select');
+    if (ss) ss.value = roomId;
+  } else if (!selDestId && selStartId !== roomId) {
+    selDestId = roomId;
+    const ds = document.getElementById('dest-select');
+    if (ds) ds.value = roomId;
+    calculateRoute();
+    return;
+  } else {
+    // If both or clicking same, set as start and clear dest
+    selStartId = roomId;
+    selDestId = '';
+    const ss = document.getElementById('start-select');
+    const ds = document.getElementById('dest-select');
+    if (ss) ss.value = roomId;
+    if (ds) ds.value = '';
+    activeRoute = null;
+    document.getElementById('route-empty-state').classList.remove('hidden');
+    document.getElementById('route-active-details').classList.add('hidden');
+    document.getElementById('route-stat-badge').classList.add('hidden');
+  }
+  renderRouteMap();
+}
+
+function calculateRoute() {
+  if (!selStartId || !selDestId) return;
+  const result = findShortestRoute(selStartId, selDestId);
+  activeRoute = result;
+
+  if (result) {
+    document.getElementById('route-empty-state').classList.add('hidden');
+    document.getElementById('route-active-details').classList.remove('hidden');
+    
+    const badge = document.getElementById('route-stat-badge');
+    badge.textContent = `${result.distanceM} m · ~${result.walkSec}s walk`;
+    badge.classList.remove('hidden');
+
+    document.getElementById('stat-dist').textContent = `${result.distanceM} m`;
+    document.getElementById('stat-time').textContent = `~${result.walkSec} sec`;
+
+    const container = document.getElementById('steps-container');
+    container.innerHTML = '';
+    result.instructions.forEach((step, idx) => {
+      const isStart = idx === 0;
+      const isEnd = idx === result.instructions.length - 1;
+      const icon = isStart ? '📍' : isEnd ? '🎯' : '🚶';
+      const bg = isStart ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800' : isEnd ? 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800' : 'bg-muted/40 border-border';
+
+      const el = document.createElement('div');
+      el.className = `flex items-start gap-2.5 p-2.5 rounded-lg border text-xs font-medium ${bg}`;
+      el.innerHTML = `
+        <span class="text-base shrink-0">${icon}</span>
+        <div class="flex-1">
+          <p class="leading-relaxed">${step}</p>
+        </div>
+      `;
+      container.appendChild(el);
+    });
+  }
+
+  renderRouteMap();
+}
+
+// Render the interactive SVG map
+function renderRouteMap() {
+  const svg = document.getElementById('route-svg');
+  if (!svg) return;
+  const f = FLOORS[currentFloor];
+  svg.setAttribute('viewBox', `0 0 ${f.width} ${f.height}`);
+
+  let html = '';
+
+  // 1. Background image (Architectural Plan)
+  if (mapMode === 'blueprint') {
+    html += `<image href="${f.img}" x="0" y="0" width="${f.width}" height="${f.height}" class="plan-img-blueprint opacity-90"/>`;
+  } else {
+    // Vector schematic fallback
+    html += `<rect x="0" y="0" width="${f.width}" height="${f.height}" fill="#fafaf9" class="dark:fill-slate-900"/>`;
+  }
+
+  // 2. Room polygons and labels for current floor
+  const floorRooms = ALL_ROOMS.filter(r => r.floor === currentFloor);
+  floorRooms.forEach(r => {
+    const isStart = r.id === selStartId;
+    const isDest = r.id === selDestId;
+    const isStairs = !!r.isStairs;
+
+    const fill = isStart ? '#3b82f6' : isDest ? '#ef4444' : isStairs ? '#f59e0b' : '#8b5cf6';
+    const fillOpacity = isStart || isDest ? 0.35 : mapMode === 'blueprint' ? 0.12 : 0.25;
+    const stroke = isStart ? '#2563eb' : isDest ? '#dc2626' : isStairs ? '#d97706' : '#6d28d9';
+    const strokeWidth = isStart || isDest ? 3 : 1.5;
+
+    html += `
+      <g class="room-hover" onclick="onRoomClick('${r.id}')" onmouseenter="showTooltip(event, '${r.name}')" onmouseleave="hideTooltip()">
+        <rect x="${r.box[0]}" y="${r.box[1]}" width="${r.box[2]}" height="${r.box[3]}"
+              fill="${fill}" fill-opacity="${fillOpacity}" stroke="${stroke}" stroke-width="${strokeWidth}" rx="4"/>
+        ${mapMode === 'vector' ? `
+          <text x="${r.center[0]}" y="${r.center[1]}" text-anchor="middle" font-size="11" font-weight="600" fill="#1e293b" class="dark:fill-slate-200 pointer-events-none">${r.label}</text>
+        ` : ''}
+      </g>
+    `;
+  });
+
+  // 3. Draw walkable corridor guide lines (subtle hint in vector mode)
+  if (mapMode === 'vector') {
+    GRAPH_EDGES.forEach(([u, v]) => {
+      const p1 = GRAPH_NODES[u], p2 = GRAPH_NODES[v];
+      if (p1 && p2 && ((currentFloor === 0 && u.startsWith('w_')) || (currentFloor === 1 && u.startsWith('fw_')))) {
+        html += `<line x1="${p1[0]}" y1="${p1[1]}" x2="${p2[0]}" y2="${p2[1]}" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="3 3"/>`;
+      }
+    });
+  }
+
+  // 4. Render Active Route Polyline (Filtered for current floor)
+  if (activeRoute && activeRoute.coords && activeRoute.coords.length > 1) {
+    // Collect coordinates that belong to current floor
+    const currentCoords = [];
+    activeRoute.path.forEach((nodeId, idx) => {
+      const isGF = nodeId.startsWith('g') || nodeId.startsWith('d_g') || nodeId.startsWith('w_') || nodeId === 'd_sw' || nodeId === 'd_se';
+      const isFF = nodeId.startsWith('f') || nodeId.startsWith('d_f') || nodeId.startsWith('fw_');
+      if ((currentFloor === 0 && isGF) || (currentFloor === 1 && isFF)) {
+        currentCoords.push(GRAPH_NODES[nodeId]);
+      }
+    });
+
+    if (currentCoords.length > 1) {
+      const pts = currentCoords.map(c => `${c[0]},${c[1]}`).join(' ');
+
+      // Glowing aura line
+      html += `<polyline points="${pts}" fill="none" stroke="#a855f7" class="route-glow" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+      // Animated dashed navigation line
+      html += `<polyline points="${pts}" fill="none" stroke="#7c3aed" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" class="route-line"/>`;
+
+      // Waypoint turn circles
+      currentCoords.forEach((pt, i) => {
+        if (i > 0 && i < currentCoords.length - 1) {
+          html += `<circle cx="${pt[0]}" cy="${pt[1]}" r="4" fill="#7c3aed" stroke="#ffffff" stroke-width="2"/>`;
+        }
+      });
+    }
+  }
+
+  // 5. Start & Destination Pins (if present on current floor)
+  const startRoom = ALL_ROOMS.find(r => r.id === selStartId);
+  const destRoom = ALL_ROOMS.find(r => r.id === selDestId);
+
+  if (startRoom && startRoom.floor === currentFloor) {
+    const [sx, sy] = startRoom.center;
+    html += `
+      <g>
+        <circle cx="${sx}" cy="${sy}" r="14" fill="#2563eb" fill-opacity="0.3" class="pulse-dot"/>
+        <circle cx="${sx}" cy="${sy}" r="8" fill="#2563eb" stroke="#ffffff" stroke-width="2.5"/>
+        <rect x="${sx - 24}" y="${sy - 28}" width="48" height="16" rx="4" fill="#2563eb"/>
+        <text x="${sx}" y="${sy - 17}" text-anchor="middle" font-size="9" font-weight="bold" fill="#ffffff">START</text>
+      </g>
+    `;
+  }
+
+  if (destRoom && destRoom.floor === currentFloor) {
+    const [dx, dy] = destRoom.center;
+    html += `
+      <g>
+        <circle cx="${dx}" cy="${dy}" r="14" fill="#dc2626" fill-opacity="0.3" class="pulse-dot"/>
+        <circle cx="${dx}" cy="${dy}" r="8" fill="#dc2626" stroke="#ffffff" stroke-width="2.5"/>
+        <rect x="${dx - 22}" y="${dy - 28}" width="44" height="16" rx="4" fill="#dc2626"/>
+        <text x="${dx}" y="${dy - 17}" text-anchor="middle" font-size="9" font-weight="bold" fill="#ffffff">DEST</text>
+      </g>
+    `;
+  }
+
+  svg.innerHTML = html;
+}
+
+function showTooltip(e, text) {
+  const tt = document.getElementById('room-tooltip');
+  if (!tt) return;
+  tt.textContent = text;
+  tt.classList.remove('hidden');
+  const rect = e.currentTarget.getBoundingClientRect();
+  const parent = e.currentTarget.closest('.relative').getBoundingClientRect();
+  tt.style.left = `${rect.left - parent.left + rect.width / 2}px`;
+  tt.style.top = `${rect.top - parent.top - 28}px`;
+  tt.style.transform = 'translateX(-50%)';
+}
+
+function hideTooltip() {
+  const tt = document.getElementById('room-tooltip');
+  if (tt) tt.classList.add('hidden');
+}
+
+function initRoutePage() {
+  switchFloor(0);
+}
+function initHomePage() {}
+</script>
+</body>
+</html>
