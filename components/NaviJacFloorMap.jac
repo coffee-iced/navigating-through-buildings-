@@ -1,6 +1,6 @@
 import from .ui.badge { Badge }
 
-def:pub NaviJacFloorMap(start_label: str = "", destination_label: str = "") -> JsxElement {
+def:pub NaviJacFloorMap(start_label: str = "", destination_label: str = "", polyline_points: str = "") -> JsxElement {
     return <section className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Library · Ground floor</h2><p className="text-sm text-muted-foreground">Plan-based demo map · printed dimension grid</p></div><Badge variant="outline">Demo scale: 6 m grid</Badge></div>
         <div className="overflow-x-auto rounded-lg border bg-background p-2"><svg viewBox="0 0 960 620" className="mx-auto block h-auto w-full" role="img" aria-label="Top-down ground floor diagram with rooms around an open lobby">
@@ -21,6 +21,7 @@ def:pub NaviJacFloorMap(start_label: str = "", destination_label: str = "") -> J
             <rect x="782" y="396" width="98" height="172" fill="#e7e5e4" stroke="#57534e" strokeWidth="2"/><text x="831" y="478" textAnchor="middle" fontSize="12">Gents lunch</text>
             <path d="M284 194v170h496V294" fill="none" stroke="#ffffff" strokeWidth="12"/><text x="520" y="350" textAnchor="middle" fontSize="18" fontWeight="600" fill="#44403c">OPEN LOBBY / CIRCULATION</text>
             <path d="M382 192v24 M582 244h24 M780 294h24 M380 396v24 M780 396v24 M282 396v24" stroke="#ffffff" strokeWidth="9" />
+            {if len(polyline_points) > 0 { <g><polyline points={polyline_points} fill="none" stroke="#a855f7" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" opacity="0.4" className="route-glow" /><polyline points={polyline_points} fill="none" stroke="#7c3aed" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" className="route-line" /></g> }}
             {if len(start_label) > 0 { <g><circle cx="520" cy="350" r="13" fill="#2563eb" stroke="white" strokeWidth="4"/><text x="520" y="329" textAnchor="middle" fontSize="12" fill="#1d4ed8">START</text></g> }}
             {if len(destination_label) > 0 { <g><circle cx="740" cy="350" r="13" fill="#dc2626" stroke="white" strokeWidth="4"/><text x="740" y="329" textAnchor="middle" fontSize="12" fill="#b91c1c">DESTINATION</text></g> }}
             <text x="480" y="602" textAnchor="middle" fontSize="12" fill="#78716c">Schematic map based on the supplied overhead plan</text>

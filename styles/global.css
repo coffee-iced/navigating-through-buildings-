@@ -126,7 +126,19 @@
     body {
         @apply font-sans bg-background text-foreground;
     }
-    html {
-        @apply font-sans;
-    }
+}
+
+.route-line {
+    stroke-dasharray: 10 7;
+    animation: routeDash 1.2s linear infinite;
+}
+@keyframes routeDash {
+    to { stroke-dashoffset: -34; }
+}
+.route-glow {
+    animation: glowPulse 2s ease-in-out infinite alternate;
+}
+@keyframes glowPulse {
+    from { stroke-opacity: 0.35; stroke-width: 8px; }
+    to { stroke-opacity: 0.65; stroke-width: 11px; }
 }
